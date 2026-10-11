@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-annotate"
+description = "Enables the annotate command without any pre-configured scope."
+commands.allow = ["annotate"]
+
+[[permission]]
+identifier = "deny-annotate"
+description = "Denies the annotate command without any pre-configured scope."
+commands.deny = ["annotate"]

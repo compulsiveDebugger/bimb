@@ -1,0 +1,6 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "windows": ["main"],
+  "permissions": ["core:default", "allow-overview", "allow-query", "allow-get-asset", "allow-add-source", "allow-scan-control", "allow-refresh-sources", "allow-annotate", "allow-album", "allow-update-source", "allow-relink-source", "allow-remove-source", "allow-settings", "allow-clear-thumbnails", "allow-backup", "allow-restore", "allow-export-annotations", "allow-open-original"]
+}

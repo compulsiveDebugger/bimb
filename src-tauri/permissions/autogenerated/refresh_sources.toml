@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-refresh-sources"
+description = "Enables the refresh_sources command without any pre-configured scope."
+commands.allow = ["refresh_sources"]
+
+[[permission]]
+identifier = "deny-refresh-sources"
+description = "Denies the refresh_sources command without any pre-configured scope."
+commands.deny = ["refresh_sources"]

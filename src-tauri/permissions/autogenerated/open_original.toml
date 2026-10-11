@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-original"
+description = "Enables the open_original command without any pre-configured scope."
+commands.allow = ["open_original"]
+
+[[permission]]
+identifier = "deny-open-original"
+description = "Denies the open_original command without any pre-configured scope."
+commands.deny = ["open_original"]
