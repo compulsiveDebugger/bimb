@@ -9,6 +9,9 @@ use std::{
 };
 
 fn wait(lib: &Library, id: &str) {
+    wait_for_state(lib, id, "complete");
+}
+fn wait_for_state(lib: &Library, id: &str, expected: &str) {
     let start = Instant::now();
     loop {
         let overview = lib.overview().unwrap();
@@ -16,7 +19,7 @@ fn wait(lib: &Library, id: &str) {
         if !["queued", "scanning"].contains(&source.scan_state.as_str())
             && lib.require_idle(id).is_ok()
         {
-            assert_eq!(source.scan_state, "complete");
+            assert_eq!(source.scan_state, expected);
             return;
         }
         assert!(
@@ -26,6 +29,90 @@ fn wait(lib: &Library, id: &str) {
         );
         std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+#[test]
+fn unreadable_folders_report_paths_and_recover_on_rescan() {
+    use std::os::unix::fs::PermissionsExt;
+    struct RestorePermissions(std::path::PathBuf);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("photos");
+    let folder = root.join("旅行/locked");
+    fs::create_dir_all(&folder).unwrap();
+    fs::copy(fixture(), folder.join("original.jpg")).unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let id = lib.add_source(root).unwrap();
+    wait(&lib, &id);
+    let asset = lib.query(Query::default()).unwrap().assets.remove(0);
+    lib.annotate(
+        asset.id.clone(),
+        Annotation {
+            favorite: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    fs::remove_file(folder.join("original.jpg")).unwrap();
+    let permissions = RestorePermissions(folder.clone());
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap();
+    lib.start_scan(&id).unwrap();
+    wait_for_state(&lib, &id, "partial");
+    let page = lib.source_issues(&id, None).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.issues[0].path.as_deref(), Some("旅行/locked"));
+    assert_eq!(page.issues[0].code, "folder_unreadable");
+    assert!(!page.issues[0].message.is_empty());
+    let source = lib.overview().unwrap().sources.remove(0);
+    assert_eq!(source.scan_errors, 1);
+    assert_eq!(source.media_errors, 0);
+    assert_eq!(lib.asset(&asset.id).unwrap().availability, "present");
+    assert!(lib.asset(&asset.id).unwrap().favorite);
+    drop(permissions);
+    lib.start_scan(&id).unwrap();
+    wait(&lib, &id);
+    assert_eq!(lib.source_issues(&id, None).unwrap().total, 0);
+    assert_eq!(lib.asset(&asset.id).unwrap().availability, "missing");
+    assert!(lib.asset(&asset.id).unwrap().favorite);
+}
+
+#[test]
+fn scan_issue_backups_restore_current_and_version_one_catalogs() {
+    use bimb_core::platform;
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let root = tmp.path().join("photos");
+    fs::create_dir(&root).unwrap();
+    lib.catalog().call(move |db| {
+        db.execute("INSERT INTO sources(id,name,path,display_path,volume,root_key) VALUES('source','Holiday',?,?,'volume','root')", rusqlite::params![platform::path_bytes(&root),root.to_string_lossy()])?;
+        db.execute("INSERT INTO issues(source_id,code,path,message) VALUES('source','folder_unreadable',?,'Permission denied')", [platform::path_bytes(std::path::Path::new("旅行/locked"))])?;
+        Ok(())
+    }).unwrap();
+    let backup = tmp.path().join("backup.sqlite");
+    lib.backup(&backup).unwrap();
+    lib.restore(&backup).unwrap();
+    let page = lib.source_issues("source", None).unwrap();
+    assert_eq!(page.issues[0].path.as_deref(), Some("旅行/locked"));
+    assert_eq!(page.issues[0].message, "Permission denied");
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    db.execute_batch("DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); INSERT INTO issues(source_id,code) VALUES('source','folder_unreadable'); PRAGMA user_version=1;").unwrap();
+    drop(db);
+    lib.restore(&backup).unwrap();
+    let page = lib.source_issues("source", None).unwrap();
+    assert_eq!(page.total, 1);
+    assert!(page.issues[0].path.is_none());
+    assert_eq!(lib.overview().unwrap().sources[0].name, "Holiday");
+    // Upgrading a backup must leave the selected backup file itself untouched.
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
 }
 fn fixture() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mountain.jpg")

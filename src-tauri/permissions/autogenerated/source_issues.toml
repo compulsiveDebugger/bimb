@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-source-issues"
+description = "Enables the source_issues command without any pre-configured scope."
+commands.allow = ["source_issues"]
+
+[[permission]]
+identifier = "deny-source-issues"
+description = "Denies the source_issues command without any pre-configured scope."
+commands.deny = ["source_issues"]

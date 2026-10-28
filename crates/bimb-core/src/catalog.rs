@@ -50,7 +50,9 @@ CREATE INDEX IF NOT EXISTS asset_capture ON assets(captured,id);
 CREATE TABLE IF NOT EXISTS albums(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS memberships(album_id TEXT REFERENCES albums(id) ON DELETE CASCADE,
  asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE, position INTEGER NOT NULL, PRIMARY KEY(album_id,asset_id));
-CREATE TABLE IF NOT EXISTS issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,
+ code TEXT NOT NULL,path BLOB,message TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS issue_source ON issues(source_id,id);
 CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(asset_id UNINDEXED, text, tokenize='unicode61 remove_diacritics 2');
 CREATE TRIGGER IF NOT EXISTS asset_search_insert AFTER INSERT ON assets BEGIN
  INSERT INTO search(asset_id,text) VALUES(new.id,new.filename||' '||new.folder||' '||new.caption||' '||new.tags||' '||new.place||' '||coalesce(json_extract(new.metadata,'$.camera'),'')); END;
@@ -63,8 +65,24 @@ CREATE VIEW IF NOT EXISTS library AS SELECT a.*,s.name AS source_name,
  CASE WHEN a.date_override<>'' THEN 'user' WHEN a.captured IS NOT NULL THEN 'embedded' ELSE 'file_modified' END AS date_source,
  CASE WHEN s.state<>'online' THEN s.state ELSE a.state END AS availability
  FROM assets a JOIN sources s ON s.id=a.source_id;
-PRAGMA user_version=1;
 "#;
+
+pub const SCHEMA_VERSION: i64 = 2;
+
+pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version > SCHEMA_VERSION {
+        bail!("This catalog needs a newer Bimb version");
+    }
+    let tx = connection.transaction()?;
+    if version == 1 {
+        tx.execute_batch("ALTER TABLE issues ADD COLUMN path BLOB; ALTER TABLE issues ADD COLUMN message TEXT NOT NULL DEFAULT '';")?;
+    }
+    tx.execute_batch(SCHEMA)?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
 
 pub fn bump(c: &Connection) -> Result<()> {
     c.execute(
@@ -141,16 +159,10 @@ impl Catalog {
     pub fn open(path: &Path) -> Result<Self> {
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(3))?;
-        let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 1 {
-            bail!("This catalog needs a newer Bimb version");
-        }
         connection.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
-        let tx = connection.transaction()?;
-        tx.execute_batch(SCHEMA)?;
-        tx.commit()?;
+        migrate(&mut connection)?;
         connection.execute(
             "UPDATE sources SET scan_state='interrupted' WHERE scan_state IN ('scanning','queued')",
             [],
@@ -181,12 +193,38 @@ impl Catalog {
         let id = id.to_owned();
         self.call(move |c| source(c, &id))
     }
+    pub fn source_issues(&self, id: &str, cursor: Option<String>) -> Result<SourceIssuePage> {
+        let id = id.to_owned();
+        self.call(move |c| {
+            let generation: i64 = c.query_row("SELECT generation FROM sources WHERE id=?", [&id], |r| r.get(0))?;
+            let mut after = 0;
+            if let Some(cursor) = cursor {
+                let decoded = URL_SAFE_NO_PAD.decode(cursor).context("Invalid issue cursor")?;
+                let (source, scan, last): (String, i64, i64) = serde_json::from_slice(&decoded).context("Invalid issue cursor")?;
+                if source != id || scan != generation {
+                    bail!("scan_changed");
+                }
+                after = last;
+            }
+            let total = c.query_row("SELECT count(*) FROM issues WHERE source_id=?", [&id], |r| r.get(0))?;
+            let mut issues = c.prepare("SELECT id,path,code,message FROM issues WHERE source_id=? AND id>? ORDER BY id LIMIT 101")?
+                .query_map(params![id, after], |r| {
+                    let path: Option<Vec<u8>> = r.get(1)?;
+                    Ok(SourceIssue { id:r.get(0)?, path:path.map(|p|platform::from_bytes(p).to_string_lossy().into_owned()), code:r.get(2)?, message:r.get(3)? })
+                })?.collect::<rusqlite::Result<Vec<_>>>()?;
+            let next_cursor = if issues.len() > 100 {
+                issues.truncate(100);
+                Some(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(&id, generation, issues[99].id))?))
+            } else { None };
+            Ok(SourceIssuePage { issues, total, next_cursor })
+        })
+    }
     pub fn overview(&self) -> Result<Overview> {
         self.call(|c| {
-            let sources = c.prepare("SELECT s.*, (SELECT count(*) FROM assets WHERE source_id=s.id) total,(SELECT count(*) FROM assets WHERE source_id=s.id AND error IS NOT NULL)+(SELECT count(*) FROM issues WHERE source_id=s.id) errors FROM sources s ORDER BY name")?
+            let sources = c.prepare("SELECT s.*, (SELECT count(*) FROM assets WHERE source_id=s.id) total,(SELECT count(*) FROM assets WHERE source_id=s.id AND error IS NOT NULL) media_errors,(SELECT count(*) FROM issues WHERE source_id=s.id) scan_errors FROM sources s ORDER BY name")?
                 .query_map([], |r| { let ex:String=r.get("exclusions")?; Ok(Source {
                     id:r.get("id")?,name:r.get("name")?,path:r.get("display_path")?,volume_id:r.get("volume")?,state:r.get("state")?,scan_state:r.get("scan_state")?,
-                    total:r.get("total")?,errors:r.get("errors")?,last_scan:r.get("last_scan")?,exclusions:serde_json::from_str(&ex).unwrap_or_default() }) })?.collect::<rusqlite::Result<Vec<_>>>()?;
+                    total:r.get("total")?,errors:r.get::<_,i64>("media_errors")?+r.get::<_,i64>("scan_errors")?,media_errors:r.get("media_errors")?,scan_errors:r.get("scan_errors")?,last_scan:r.get("last_scan")?,exclusions:serde_json::from_str(&ex).unwrap_or_default() }) })?.collect::<rusqlite::Result<Vec<_>>>()?;
             let albums=c.prepare("SELECT a.id,a.name,count(m.asset_id) FROM albums a LEFT JOIN memberships m ON a.id=m.album_id GROUP BY a.id ORDER BY a.name")?.query_map([],|r|Ok(Album{id:r.get(0)?,name:r.get(1)?,count:r.get(2)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let (total,photos,videos,favorites,bytes,thumbnail_bytes) = c.query_row("SELECT count(*),coalesce(sum(kind='photo'),0),coalesce(sum(kind='video'),0),coalesce(sum(favorite),0),coalesce(sum(size),0),coalesce(sum(thumbnail_bytes),0) FROM assets",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get::<_,i64>(5)?)))?;
             let folders=c.prepare("SELECT DISTINCT folder FROM assets WHERE folder<>'' ORDER BY folder LIMIT 1000")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;

@@ -64,6 +64,7 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
     let root = source.root.clone();
     let walker = walkdir::WalkDir::new(&source.root)
         .follow_links(false)
+        .same_file_system(true)
         .max_open(16)
         .into_iter()
         .filter_entry(move |entry| {
@@ -77,9 +78,6 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
                 && !name.starts_with('.')
                 && !name.ends_with(".photoslibrary")
                 && !name.ends_with(".app")
-                && entry
-                    .metadata()
-                    .is_ok_and(|m| platform::device(&m) == device)
         });
     for entry in walker {
         if !active(flag) {
@@ -91,9 +89,16 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
         }
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => {
+            Err(error) => {
                 complete = false;
-                issue(lib, id, "folder_unreadable")?;
+                issue(
+                    lib,
+                    id,
+                    error.path(),
+                    &source.root,
+                    "folder_unreadable",
+                    &error.to_string(),
+                )?;
                 continue;
             }
         };
@@ -105,8 +110,16 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
         };
         let info = match std::fs::symlink_metadata(entry.path()) {
             Ok(m) => m,
-            Err(_) => {
+            Err(error) => {
                 complete = false;
+                issue(
+                    lib,
+                    id,
+                    Some(entry.path()),
+                    &source.root,
+                    "file_unreadable",
+                    &error.to_string(),
+                )?;
                 continue;
             }
         };
@@ -322,13 +335,24 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
         Ok(())
     })
 }
-fn issue(lib: &Library, id: &str, code: &str) -> Result<()> {
+fn issue(
+    lib: &Library,
+    id: &str,
+    path: Option<&Path>,
+    root: &Path,
+    code: &str,
+    message: &str,
+) -> Result<()> {
     let id = id.to_owned();
+    let path = path
+        .and_then(|p| p.strip_prefix(root).ok())
+        .map(platform::path_bytes);
     let code = code.to_owned();
+    let message = message.to_owned();
     lib.catalog().call(move |c| {
         c.execute(
-            "INSERT INTO issues(source_id,code) VALUES(?,?)",
-            params![id, code],
+            "INSERT INTO issues(source_id,path,code,message) VALUES(?,?,?,?)",
+            params![id, path, code, message],
         )?;
         Ok(())
     })

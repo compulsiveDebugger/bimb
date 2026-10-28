@@ -2,6 +2,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "overview",
+            "source_issues",
             "query",
             "get_asset",
             "add_source",

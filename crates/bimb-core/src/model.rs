@@ -10,8 +10,25 @@ pub struct Source {
     pub scan_state: String,
     pub total: i64,
     pub errors: i64,
+    pub media_errors: i64,
+    pub scan_errors: i64,
     pub last_scan: Option<String>,
     pub exclusions: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SourceIssue {
+    pub id: i64,
+    pub path: Option<String>,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SourceIssuePage {
+    pub issues: Vec<SourceIssue>,
+    pub total: i64,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

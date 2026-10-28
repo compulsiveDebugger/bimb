@@ -1,6 +1,6 @@
 # Apple Silicon preview validation
 
-10–11 October 2026. Local development preview; this is not a general availability or cross-platform certification.
+10–11 October 2026, with scan-report validation on 28 October 2026. Local development preview; this is not a general availability or cross-platform certification.
 
 ## Environment and commands
 
@@ -9,19 +9,23 @@
 - SQLite 3.53.2, bundled through rusqlite 0.40.2.
 - `npm run check`: zero errors and zero warnings.
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`: passed.
-- `cargo test --workspace --offline`: all 10 targeted tests passed with native codec access.
+- `cargo test --workspace --offline`: all 14 targeted tests passed with native codec and filesystem notification access on 28 October.
 
 ## Automated evidence
 
 | Test group | Verified behavior |
 |---|---|
-| Catalog, 3 tests | Literal full-text search, annotation search updates, pagination/ties, stale cursor rejection, valid date overrides, memory provenance and exclusions. |
-| Library, 6 tests | Scan/rescan, rename identity and annotations, source overlap rejection, originals unchanged, offline thumbnails, relink, backup/restore and safety-backup restore, source interruption, budget enforcement, exclusive catalog lock, Unicode filenames/lossless path serialization, symlink rejection, corrupt media handling, watcher attachment reconciliation, and subsequent file-add notifications. |
+| Catalog, 5 tests | Literal full-text search, annotation search updates, pagination/ties, stale cursor rejection, valid date overrides, memory provenance and exclusions; source-scoped 100-issue pages, cursor rejection after a new scan, separate media/scan counts, and schema-1 catalog migration. |
+| Library, 8 tests | Scan/rescan, rename identity and annotations, source overlap rejection, originals unchanged, offline thumbnails, relink, backup/restore and safety-backup restore, source interruption, budget enforcement, exclusive catalog lock, Unicode filenames/lossless path serialization, symlink rejection, corrupt media handling, watcher attachment reconciliation, and subsequent file-add notifications; unreadable-folder reporting and recovery, conservative missing-file handling during a partial scan, and schema-1/2 backup restoration. |
 | Desktop protocol, 1 test | Bounded video byte ranges, suffix/open ranges, invalid and out-of-bounds requests. |
 
 Fixtures are synthetic JPEG, PNG, HEIC, H.264 MP4 and HEVC MOV, plus deliberately corrupt JPEG. Orientation, GPS and dimensions are checked. APFS rejects invalid UTF-8 filenames, so arbitrary-byte serialization is checked independently from actual Unicode filename I/O.
 
 The interrupted-source test renames the root during a rescan of 40 images and verifies that all prior entries remain offline rather than becoming missing. It does not emulate every physical USB/filesystem failure.
+
+On 28 October, a real source subfolder with a Unicode path was made unreadable using filesystem permissions. Its scan stayed partial, reported the relative path and underlying error, and preserved the previously indexed asset and favorite. Restoring access and rescanning cleared the report and correctly reconciled the now-missing file. Catalog tests cover 205 scan issues across three bounded pages and rejection of a cursor from an earlier scan. Backup tests restore schema-1 and schema-2 reports and verify that upgrading leaves the selected backup unchanged.
+
+A browser UI smoke test with synthetic desktop responses verified the expanded report, Unicode paths, separate scan/media controls, all 205 issues, refresh, and recovery from a stale scan cursor. This is UI evidence with a stub API, not a native-window acceptance test. The updated macOS app bundle built successfully (9.69 MiB).
 
 ## Native UI evidence
 
@@ -46,7 +50,7 @@ On 11 October, the final native release displayed the HEIC cached thumbnail, cap
 - Filesystem notifications debounce for two seconds. Source availability refreshes every 30 seconds; a 15-minute reconciliation repairs missed watcher events. Pause/cancel is respected. Scans retry incomplete operations on a later rescan.
 - Relinks require the same volume UUID and root identity; a copied/replacement drive is a new source. Automatic remount lookup only handles unique matches below `/Volumes`.
 - One SQLite actor serializes reads and writes. This is adequate for the measured 3,000-row workload; a dedicated read pool is not implemented.
-- Date and named-place collections use filters and manual albums. Saved dynamic collections and a folder tree are not implemented. The error filter exposes media errors; folder traversal issues currently appear as source attention counts rather than a detailed per-folder report.
+- Date and named-place collections use filters and manual albums. Saved dynamic collections and a folder tree are not implemented. The error filter exposes media errors. Expand **Show scan issues** in a source card for affected source-relative paths and error details, fetched in pages of 100. Refresh the report during a scan; a rescan replaces prior issues. Old pathless issues are preserved through migration and gain details on rescan.
 - Image GPS is normalized; video location metadata is retained as raw text and is not yet available to the GPS filter. EXIF offsets are retained; date grouping uses recorded wall time, and filesystem-date fallbacks are excluded from memories unless overridden.
 - Still previews are capped at 2,560 pixels. Thumbnails are capped at 512 pixels. Full-resolution originals can be opened explicitly in another application.
 - Catalog backups preserve organization and source references, not originals or thumbnails. Restoring marks thumbnails for regeneration; disconnected sources may need reconnecting to repopulate thumbnails.
@@ -57,5 +61,5 @@ On 11 October, the final native release displayed the HEIC cached thumbnail, cap
 - Validate a representative subset of the user's phone exports, including audio, HDR, rotation, variable frame rate, long videos, and any motion-photo variants.
 - Measure initial scan, warm rescan, UI latency and combined memory on the actual 3,000-file / 1 TB library.
 - Physical external-drive hot unplug/reconnect and filesystem-specific identity tests (including exFAT); source permission changes, app termination at commit boundaries, disk-full injection, and invalid/migration recovery scenarios.
-- Detailed folder error reporting, viewport-priority decoding, saved dynamic collections, and a full implementation review against the approved architecture before declaring the complete first release.
+- Viewport-priority decoding, saved dynamic collections, and a full implementation review against the approved architecture before declaring the complete first release.
 - Public distribution requires signing/notarization and a license decision. Windows and Intel/macOS compatibility need their own native adapters and validation phase.

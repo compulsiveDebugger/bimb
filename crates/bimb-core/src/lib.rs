@@ -79,6 +79,9 @@ impl Library {
     pub fn query(&self, q: Query) -> Result<Page> {
         self.0.catalog.query(q)
     }
+    pub fn source_issues(&self, id: &str, cursor: Option<String>) -> Result<SourceIssuePage> {
+        self.catalog().source_issues(id, cursor)
+    }
     pub fn asset(&self, id: &str) -> Result<Asset> {
         let id = id.to_owned();
         self.catalog().call(move |c| {
@@ -251,7 +254,16 @@ impl Library {
         let library = self.clone();
         std::thread::Builder::new().name("bimb-scan".into()).spawn(move|| {
             let result=scan::run(&library,&key,&flag);
-            if result.is_err()&&flag.load(Ordering::SeqCst)==0 {let id=key.clone();let _=library.catalog().call(move|c|{c.execute("UPDATE sources SET scan_state='interrupted' WHERE id=?",[&id])?;c.execute("INSERT INTO issues(source_id,code) SELECT id,'scan_interrupted' FROM sources WHERE id=?",[id])?;Ok(())});}
+            if let Err(error)=result && flag.load(Ordering::SeqCst)==0 {
+                let id=key.clone();
+                let message=format!("{error:#}");
+                let _=library.catalog().call(move|c|{
+                    let tx=c.transaction()?;
+                    tx.execute("UPDATE sources SET scan_state='interrupted' WHERE id=?",[&id])?;
+                    tx.execute("INSERT INTO issues(source_id,code,message) SELECT id,'scan_interrupted',? FROM sources WHERE id=?",params![message,id])?;
+                    tx.commit()?;Ok(())
+                });
+            }
             library.0.scans.lock().unwrap().remove(&key);
         })?;
         Ok(())
@@ -427,7 +439,7 @@ impl Library {
         )?;
         let integrity: String = check.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
         let version: i64 = check.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if integrity != "ok" || version != 1 {
+        if integrity != "ok" || !(1..=catalog::SCHEMA_VERSION).contains(&version) {
             bail!("Not a compatible Bimb catalog backup");
         }
         // Probe required schema before replacing anything.
@@ -442,6 +454,11 @@ impl Library {
             .join(format!("restore-{}.sqlite", uuid::Uuid::new_v4()));
         std::fs::copy(path, &staged)?;
         let result = (|| {
+            // Upgrade and validate the staged backup before replacing the active catalog.
+            let mut staged_catalog = rusqlite::Connection::open(&staged)?;
+            catalog::migrate(&mut staged_catalog)?;
+            staged_catalog.prepare("SELECT id,source_id,code,path,message FROM issues")?;
+            drop(staged_catalog);
             self.backup(&self.0.home.join("before-restore.sqlite"))?;
             let path = staged.clone();
             self.catalog().call(move|c|{

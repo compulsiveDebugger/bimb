@@ -19,6 +19,15 @@ async fn overview(lib: State<'_, Library>) -> Response<Overview> {
     work(move || lib.overview()).await
 }
 #[tauri::command]
+async fn source_issues(
+    lib: State<'_, Library>,
+    id: String,
+    cursor: Option<String>,
+) -> Response<SourceIssuePage> {
+    let lib = lib.inner().clone();
+    work(move || lib.source_issues(&id, cursor)).await
+}
+#[tauri::command]
 async fn query(lib: State<'_, Library>, query: Query) -> Response<Page> {
     let lib = lib.inner().clone();
     work(move || lib.query(query)).await
@@ -330,6 +339,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             overview,
+            source_issues,
             query,
             get_asset,
             add_source,

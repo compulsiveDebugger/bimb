@@ -1,4 +1,6 @@
-export interface Source { id:string;name:string;path:string;volume_id:string;state:string;scan_state:string;total:number;errors:number;last_scan:string|null;exclusions:string[] }
+export interface Source { id:string;name:string;path:string;volume_id:string;state:string;scan_state:string;total:number;errors:number;media_errors:number;scan_errors:number;last_scan:string|null;exclusions:string[] }
+export interface SourceIssue {id:number;path:string|null;code:string;message:string}
+export interface SourceIssuePage {issues:SourceIssue[];total:number;next_cursor:string|null}
 export interface Asset { id:string;source_id:string;source_name:string;filename:string;folder:string;kind:string;size:number;modified:string;added:string;captured:string|null;date_source:string;effective_date:string;revision:string;width:number|null;height:number|null;duration:number|null;camera:string|null;latitude:number|null;longitude:number|null;metadata_state:string;thumbnail_state:string;error:string|null;availability:string;favorite:boolean;caption:string;tags:string[];place:string;date_override:string;exclude_memory:boolean }
 export interface Annotation { favorite:boolean;caption:string;tags:string[];place:string;date_override:string;exclude_memory:boolean }
 export interface Album {id:string;name:string;count:number}
