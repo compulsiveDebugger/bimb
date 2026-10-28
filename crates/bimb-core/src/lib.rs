@@ -34,6 +34,13 @@ pub(crate) struct Inner {
 
 impl Library {
     pub fn open(home: &Path) -> Result<Self> {
+        Self::open_inner(home, None)
+    }
+    /// Use a separate host implementing Bimb's media-worker protocol (e.g. for native tests).
+    pub fn open_with_media_worker(home: &Path, worker: &Path) -> Result<Self> {
+        Self::open_inner(home, Some(worker))
+    }
+    fn open_inner(home: &Path, worker: Option<&Path>) -> Result<Self> {
         platform::private_dir(home)?;
         let home = home.canonicalize()?;
         let lock = std::fs::OpenOptions::new()
@@ -52,7 +59,10 @@ impl Library {
                 let _ = std::fs::remove_file(e.path());
             }
         }
-        let worker = platform::install_worker(&home)?;
+        let worker = match worker {
+            Some(path) => path.to_owned(),
+            None => platform::install_worker(&home)?,
+        };
         let catalog = Catalog::open(&home.join("catalog.sqlite"))?;
         let result = Self(Arc::new(Inner {
             catalog,
@@ -90,7 +100,7 @@ impl Library {
     }
     pub fn add_source(&self, path: PathBuf) -> Result<String> {
         let _guard = self.0.maintenance.lock().unwrap();
-        if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        if platform::is_link(&std::fs::symlink_metadata(&path)?) {
             bail!("Choose a folder rather than a symbolic link");
         }
         let path = path.canonicalize()?;
@@ -100,7 +110,12 @@ impl Library {
         if path.extension().is_some_and(|s| s == "photoslibrary") {
             bail!("Export files from Photos before adding them");
         }
-        let (volume, root_key) = platform::source_identity(&self.0.worker, &path)?;
+        let info = platform::source_info(&self.0.worker, &path)?;
+        let (volume, root_key) = (info.volume_id, info.root_key);
+        let relative_root = path
+            .strip_prefix(&info.mount)
+            .ok()
+            .map(platform::path_bytes);
         let id = uuid::Uuid::new_v4().to_string();
         let out = id.clone();
         self.catalog().call(move|c| {
@@ -110,7 +125,7 @@ impl Library {
             if existing.len()>=32 {bail!("This preview supports up to 32 source folders");}
             for bytes in existing {let other=platform::from_bytes(bytes);if path.starts_with(&other)||other.starts_with(&path){bail!("This folder overlaps an existing source");}}
             let name=path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
-            c.execute("INSERT INTO sources(id,name,path,display_path,volume,root_key) VALUES(?,?,?,?,?,?)",params![id,name,platform::path_bytes(&path),path.to_string_lossy(),volume,root_key])?;bump(c)?;Ok(())
+            c.execute("INSERT INTO sources(id,name,path,display_path,volume,root_key,relative_root,filesystem,drive_kind,read_only) VALUES(?,?,?,?,?,?,?,?,?,?)",params![id,name,platform::path_bytes(&path),path.to_string_lossy(),volume,root_key,relative_root,info.filesystem,info.drive_kind,info.read_only])?;bump(c)?;Ok(())
         })?;
         drop(_guard);
         self.start_scan(&out)?;
@@ -119,19 +134,26 @@ impl Library {
     pub fn relink(&self, id: &str, path: PathBuf) -> Result<()> {
         let _guard = self.0.maintenance.lock().unwrap();
         self.require_idle(id)?;
+        if platform::is_link(&std::fs::symlink_metadata(&path)?) {
+            bail!("Choose the original folder rather than a link or junction");
+        }
         let path = path.canonicalize()?;
         let old = self.catalog().source(id)?;
-        let (volume, key) = platform::source_identity(&self.0.worker, &path)?;
-        if old.volume != volume || old.root_key != key {
+        let info = platform::source_info(&self.0.worker, &path)?;
+        if old.volume != info.volume_id || old.root_key != info.root_key {
             bail!(
                 "This is not the registered folder on its original volume. Choose that folder; copied libraries need a separate source."
             );
         }
+        let relative_root = path
+            .strip_prefix(&info.mount)
+            .ok()
+            .map(platform::path_bytes);
         let id = id.to_owned();
         self.catalog().call(move |c| {
             c.execute(
-                "UPDATE sources SET path=?,display_path=?,state='online' WHERE id=?",
-                params![platform::path_bytes(&path), path.to_string_lossy(), id],
+                "UPDATE sources SET path=?,display_path=?,relative_root=?,filesystem=?,drive_kind=?,read_only=?,state='online' WHERE id=?",
+                params![platform::path_bytes(&path), path.to_string_lossy(),relative_root,info.filesystem,info.drive_kind,info.read_only, id],
             )?;
             bump(c)?;
             Ok(())
@@ -174,40 +196,67 @@ impl Library {
         })?;
         for mut source in records {
             let mut relinked = false;
-            if !source.root.exists()
-                && self.require_idle(&source.id).is_ok()
-                && let Ok(relative) = source.root.strip_prefix("/Volumes")
-            {
-                let suffix: PathBuf = relative.components().skip(1).collect();
-                let mut matches = Vec::new();
-                if let Ok(volumes) = std::fs::read_dir("/Volumes") {
-                    for volume in volumes.flatten().take(32) {
-                        let candidate = volume.path().join(&suffix);
-                        if std::fs::metadata(&candidate)
-                            .is_ok_and(|m| platform::file_key(&m) == source.root_key)
-                            && platform::source_identity(&self.0.worker, &candidate)
-                                .is_ok_and(|(v, k)| v == source.volume && k == source.root_key)
-                        {
-                            matches.push(candidate);
-                        }
+            let mut info = platform::source_info(&self.0.worker, &source.root).ok();
+            let matches_source = |v: &platform::SourceInfo| {
+                v.volume_id == source.volume && v.root_key == source.root_key
+            };
+            let mut ambiguous = false;
+            if !info.as_ref().is_some_and(matches_source) && self.require_idle(&source.id).is_ok() {
+                // Legacy macOS catalogs did not record the volume-relative root.
+                let relative = source.relative_root.clone().or_else(|| {
+                    source
+                        .root
+                        .strip_prefix("/Volumes")
+                        .ok()
+                        .map(|p| p.components().skip(1).collect::<PathBuf>())
+                });
+                if let Some(relative) = relative.filter(|p| {
+                    p.components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                }) {
+                    let candidates = platform::mount_roots(&source.volume)
+                        .into_iter()
+                        .map(|mount| mount.join(&relative));
+                    let matches = verified_reconnect_candidates(candidates, |candidate| {
+                        platform::source_identity(&self.0.worker, candidate)
+                            .is_ok_and(|(v, k)| v == source.volume && k == source.root_key)
+                    });
+                    ambiguous = matches.len() > 1;
+                    if matches.len() == 1 && self.relink(&source.id, matches[0].clone()).is_ok() {
+                        source = self.catalog().source(&source.id)?;
+                        info = platform::source_info(&self.0.worker, &source.root).ok();
+                        relinked = true;
                     }
-                }
-                if matches.len() == 1 && self.relink(&source.id, matches.remove(0)).is_ok() {
-                    source = self.catalog().source(&source.id)?;
-                    relinked = true;
                 }
             }
-            let state = match platform::source_identity(&self.0.worker, &source.root) {
-                Ok((volume, key)) if volume == source.volume && key == source.root_key => "online",
-                Ok(_) => "ambiguous",
-                Err(_) => {
-                    if source.root.exists() {
-                        "unavailable"
-                    } else {
-                        "offline"
+            let state = if ambiguous {
+                "ambiguous"
+            } else {
+                match &info {
+                    Some(v) if v.volume_id == source.volume && v.root_key == source.root_key => {
+                        "online"
                     }
+                    Some(_) => "ambiguous",
+                    None if source.root.exists() => "unavailable",
+                    None => "offline",
                 }
             };
+            // Backfill legacy sources only after their original identity has been verified.
+            if state == "online"
+                && let Some(info) = info
+            {
+                let id = source.id.clone();
+                let relative_root = source
+                    .root
+                    .strip_prefix(&info.mount)
+                    .ok()
+                    .map(platform::path_bytes);
+                self.catalog().call(move |c| {
+                    c.execute("UPDATE sources SET relative_root=?,filesystem=?,drive_kind=?,read_only=? WHERE id=?",
+                        params![relative_root,info.filesystem,info.drive_kind,info.read_only,id])?;
+                    Ok(())
+                })?;
+            }
             let id = source.id.clone();
             let state = state.to_owned();
             let (changed, resume) = self.catalog().call(move |c| {
@@ -555,7 +604,7 @@ impl Library {
             bail!("Source identity changed; relink the original drive");
         }
         let path = platform::checked_media(&source.root, &platform::from_bytes(relative))?;
-        if platform::revision(&std::fs::metadata(&path)?) != revision {
+        if platform::revision(&path, &std::fs::metadata(&path)?) != revision {
             bail!("This file changed. Rescan its source before opening it");
         }
         Ok(path)
@@ -581,5 +630,47 @@ impl Library {
         for flag in self.0.scans.lock().unwrap().values() {
             flag.store(2, Ordering::SeqCst);
         }
+    }
+}
+
+// De-duplicate equivalent mount spellings before deciding whether a reconnect is ambiguous.
+fn verified_reconnect_candidates(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    verify: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    let mut matches = Vec::new();
+    for path in candidates {
+        if let Ok(path) = path.canonicalize()
+            && !matches.contains(&path)
+            && verify(&path)
+        {
+            matches.push(path);
+        }
+    }
+    matches
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+    #[test]
+    fn reconnect_uses_verified_unique_roots_and_detects_ambiguity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("drive-a");
+        let b = tmp.path().join("drive-b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let matches = verified_reconnect_candidates(
+            [
+                a.clone(),
+                a.join("."),
+                b.clone(),
+                tmp.path().join("missing"),
+            ],
+            |p| p == a.canonicalize().unwrap(),
+        );
+        assert_eq!(matches, [a.canonicalize().unwrap()]);
+        let matches = verified_reconnect_candidates([a, b], |_| true);
+        assert_eq!(matches.len(), 2, "cloned identities must remain ambiguous");
     }
 }

@@ -14,7 +14,7 @@ flowchart TD
     API --> Sources[Sources and volume identity]
     Sources --> Jobs[Scan coordinator and durable jobs]
     Jobs --> Workers[Bounded metadata and thumbnail workers]
-    Workers --> Platform[macOS media adapter / later Windows adapter]
+    Workers --> Platform[macOS and Windows media adapters]
     Platform --> Originals[User folders and drives: read only]
     Jobs --> Writer[Single catalog writer]
     Org --> Writer
@@ -56,7 +56,7 @@ Suggested initial workspace boundaries: `bimb-core`, `bimb-catalog`, `bimb-index
 
 **Native media adapter first.** Image I/O provides image metadata and thumbnails; AVFoundation provides video asset access and frame extraction. A Rust interface hides platform-specific bindings and a minimal native bridge where necessary. Prefer downsampled decoding and embedded previews over full-resolution decode. This avoids choosing a large cross-platform codec bundle before validating the initial phone files. [Image I/O](https://developer.apple.com/documentation/imageio), [video frame extraction](https://developer.apple.com/documentation/avfoundation/creating-images-from-a-video-asset).
 
-Windows codec parity is future work. Evaluate native Windows codecs and a bundled codec backend against actual support gaps, distribution requirements, and licenses. Do not claim HEVC support solely from a `.mov` extension or the existence of a browser video element.
+The Windows increment uses WinRT/WIC image codecs and OS video properties/thumbnails in a bounded subprocess. Codec parity and native Windows validation remain open; HEIC/HEVC depend on installed codecs, and playback also depends on WebView2. Evaluate any future bundled codec backend against actual gaps, distribution requirements and licenses. Do not claim HEVC support solely from a `.mov` extension or the existence of a browser video element.
 
 ## Identity and conceptual data model
 
@@ -78,7 +78,7 @@ Windows codec parity is future work. Evaluate native Windows codecs and a bundle
 
 Initially, independent copies are separate assets. Equal filenames, sizes, or sampled hashes do not merge them. A rename can preserve identity when stable file identity plus revision evidence is sufficient; ambiguity invokes relinking or leaves entries separate. Identical files can have different user annotations, so later duplicate grouping must remain separate from destructive merging.
 
-Store native paths losslessly: tagged Unix bytes or Windows UTF-16 units, plus a separate searchable display string. Do not lowercase stored paths, normalize Unicode blindly, or persist Rust's unspecified `OsStr::as_encoded_bytes()` representation as a portable format. Cross-OS catalog imports retain provenance and require path remapping. [Rust OS strings](https://doc.rust-lang.org/std/ffi/index.html), [encoding restrictions](https://doc.rust-lang.org/std/ffi/os_str/struct.OsStr.html).
+Store native paths losslessly: Unix bytes or Windows UTF-16 units, plus a separate searchable display string. Schema 4 records the catalog's path encoding and rejects foreign-OS catalogs before decoding paths; historical schemas 1–3 use macOS Unix bytes. Cross-OS remapping is not yet implemented. Do not lowercase stored paths, normalize Unicode blindly, or persist Rust's unspecified `OsStr::as_encoded_bytes()` representation as a portable format. [Rust OS strings](https://doc.rust-lang.org/std/ffi/index.html), [encoding restrictions](https://doc.rust-lang.org/std/ffi/os_str/struct.OsStr.html).
 
 Volume identifiers may be unavailable, cloned, or differ across OSes. Corroborate them with root/file observations. Never attach a source solely because a drive letter or label matches. In ambiguous cases, show candidates and ask the user to relink; preserve asset IDs and annotations throughout.
 

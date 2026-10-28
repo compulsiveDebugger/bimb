@@ -245,12 +245,13 @@ fn scan_issue_pages_are_source_scoped_and_reject_a_new_scan() {
 }
 
 #[test]
+#[cfg(unix)]
 fn version_one_catalogs_preserve_legacy_issues_and_upgrade_once() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("catalog.sqlite");
     let db = rusqlite::Connection::open(&path).unwrap();
     db.execute_batch(bimb_core::catalog::SCHEMA).unwrap();
-    db.execute_batch("DROP TABLE collections; DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
+    db.execute_batch("ALTER TABLE sources DROP COLUMN relative_root; ALTER TABLE sources DROP COLUMN filesystem; ALTER TABLE sources DROP COLUMN drive_kind; ALTER TABLE sources DROP COLUMN read_only; DELETE FROM meta WHERE key='path_encoding'; DROP TABLE collections; DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
     db.execute("INSERT INTO sources(id,name,path,display_path,volume,root_key) VALUES('source','Holiday',X'2F','/','volume','root')", []).unwrap();
     db.execute(
         "INSERT INTO issues(source_id,code) VALUES('source','folder_unreadable')",
@@ -447,6 +448,7 @@ fn collection_edits_validate_input_and_never_change_media_or_albums() {
 }
 
 #[test]
+#[cfg(unix)]
 fn version_two_catalogs_gain_collections_without_changing_existing_organization() {
     let (tmp, c) = seeded();
     c.annotate(
@@ -459,7 +461,7 @@ fn version_two_catalogs_gain_collections_without_changing_existing_organization(
     )
     .unwrap();
     c.call(|db| {
-        db.execute_batch("INSERT INTO albums VALUES('album','Holiday'); INSERT INTO memberships VALUES('album','a',1); INSERT INTO issues(source_id,code,message) VALUES('source','folder_unreadable','Permission denied'); DROP TABLE collections; PRAGMA user_version=2;")?;
+        db.execute_batch("INSERT INTO albums VALUES('album','Holiday'); INSERT INTO memberships VALUES('album','a',1); INSERT INTO issues(source_id,code,message) VALUES('source','folder_unreadable','Permission denied'); ALTER TABLE sources DROP COLUMN relative_root; ALTER TABLE sources DROP COLUMN filesystem; ALTER TABLE sources DROP COLUMN drive_kind; ALTER TABLE sources DROP COLUMN read_only; DELETE FROM meta WHERE key='path_encoding'; DROP TABLE collections; PRAGMA user_version=2;")?;
         Ok(())
     }).unwrap();
     let migrated = Catalog::open(&tmp.path().join("catalog.sqlite")).unwrap();
@@ -494,4 +496,52 @@ fn version_two_catalogs_gain_collections_without_changing_existing_organization(
             .caption,
         "Keep me"
     );
+}
+
+#[test]
+fn catalogs_reject_foreign_native_paths_before_migration() {
+    let (tmp, c) = seeded();
+    c.call(|db| {
+        let other = if cfg!(windows) {
+            "unix-bytes"
+        } else {
+            "windows-utf16le"
+        };
+        db.execute("UPDATE meta SET value=? WHERE key='path_encoding'", [other])?;
+        Ok(())
+    })
+    .unwrap();
+    let error = match Catalog::open(&tmp.path().join("catalog.sqlite")) {
+        Ok(_) => panic!("foreign paths must not be decoded"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("another operating system"));
+    assert_eq!(c.query(Query::default()).unwrap().total, 3);
+}
+
+#[test]
+#[cfg(unix)]
+fn version_three_preserves_collections_and_backfills_drive_fields() {
+    let (tmp, c) = seeded();
+    let collection = c
+        .save_collection(
+            String::new(),
+            "Favorites".into(),
+            Query {
+                favorites: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    c.call(|db| {
+        db.execute_batch("ALTER TABLE sources DROP COLUMN relative_root; ALTER TABLE sources DROP COLUMN filesystem; ALTER TABLE sources DROP COLUMN drive_kind; ALTER TABLE sources DROP COLUMN read_only; DELETE FROM meta WHERE key='path_encoding'; PRAGMA user_version=3;")?;
+        Ok(())
+    }).unwrap();
+    let migrated = Catalog::open(&tmp.path().join("catalog.sqlite")).unwrap();
+    let info = migrated.overview().unwrap();
+    assert_eq!(info.collections[0].id, collection);
+    assert_eq!(info.sources[0].filesystem, "");
+    assert_eq!(info.sources[0].read_only, None);
+    assert!(migrated.source("source").unwrap().relative_root.is_none());
+    assert_eq!(migrated.query(Query::default()).unwrap().total, 3);
 }

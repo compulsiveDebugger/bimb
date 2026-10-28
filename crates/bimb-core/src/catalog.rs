@@ -22,6 +22,7 @@ pub struct SourceRecord {
     pub root_key: String,
     pub generation: i64,
     pub exclusions: Vec<String>,
+    pub relative_root: Option<PathBuf>,
 }
 
 pub const SCHEMA: &str = r#"
@@ -32,7 +33,8 @@ CREATE TABLE IF NOT EXISTS sources(
  id TEXT PRIMARY KEY, name TEXT NOT NULL, path BLOB NOT NULL, display_path TEXT NOT NULL,
  volume TEXT NOT NULL, root_key TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'online',
  scan_state TEXT NOT NULL DEFAULT 'idle', generation INTEGER NOT NULL DEFAULT 0,
- last_scan TEXT, exclusions TEXT NOT NULL DEFAULT '[]');
+ last_scan TEXT, exclusions TEXT NOT NULL DEFAULT '[]', relative_root BLOB,
+ filesystem TEXT NOT NULL DEFAULT '', drive_kind TEXT NOT NULL DEFAULT '', read_only INTEGER);
 CREATE TABLE IF NOT EXISTS assets(
  id TEXT PRIMARY KEY, source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
  path BLOB NOT NULL, filename TEXT NOT NULL, folder TEXT NOT NULL, file_key TEXT NOT NULL,
@@ -68,18 +70,47 @@ CREATE VIEW IF NOT EXISTS library AS SELECT a.*,s.name AS source_name,
  FROM assets a JOIN sources s ON s.id=a.source_id;
 "#;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version > SCHEMA_VERSION {
         bail!("This catalog needs a newer Bimb version");
     }
+    // Schemas 1–3 shipped only on macOS, with Unix-byte paths. Never decode them as UTF-16.
+    let encoding: Option<String> = if version == 0 {
+        None
+    } else {
+        connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='path_encoding'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+    };
+    let encoding = encoding.as_deref().unwrap_or(if version > 0 {
+        "unix-bytes"
+    } else {
+        platform::path_encoding()
+    });
+    if encoding != platform::path_encoding() {
+        bail!(
+            "This catalog uses paths from another operating system. Cross-OS catalog remapping is not supported yet; use a separate catalog on each OS."
+        );
+    }
     let tx = connection.transaction()?;
     if version == 1 {
         tx.execute_batch("ALTER TABLE issues ADD COLUMN path BLOB; ALTER TABLE issues ADD COLUMN message TEXT NOT NULL DEFAULT '';")?;
     }
+    if (1..=3).contains(&version) {
+        tx.execute_batch("ALTER TABLE sources ADD COLUMN relative_root BLOB; ALTER TABLE sources ADD COLUMN filesystem TEXT NOT NULL DEFAULT ''; ALTER TABLE sources ADD COLUMN drive_kind TEXT NOT NULL DEFAULT ''; ALTER TABLE sources ADD COLUMN read_only INTEGER;")?;
+    }
     tx.execute_batch(SCHEMA)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO meta VALUES('path_encoding',?)",
+        [platform::path_encoding()],
+    )?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -158,7 +189,7 @@ fn collection_query(mut q: Query) -> Result<Query> {
 }
 pub fn source(c: &Connection, id: &str) -> Result<SourceRecord> {
     Ok(c.query_row(
-        "SELECT id,path,volume,root_key,generation,exclusions FROM sources WHERE id=?",
+        "SELECT id,path,volume,root_key,generation,exclusions,relative_root FROM sources WHERE id=?",
         [id],
         |r| {
             let exclusions: String = r.get(5)?;
@@ -169,6 +200,7 @@ pub fn source(c: &Connection, id: &str) -> Result<SourceRecord> {
                 root_key: r.get(3)?,
                 generation: r.get(4)?,
                 exclusions: serde_json::from_str(&exclusions).unwrap_or_default(),
+                relative_root: r.get::<_,Option<Vec<u8>>>(6)?.map(platform::from_bytes),
             })
         },
     )?)
@@ -278,7 +310,7 @@ impl Catalog {
         self.call(|c| {
             let sources = c.prepare("SELECT s.*, (SELECT count(*) FROM assets WHERE source_id=s.id) total,(SELECT count(*) FROM assets WHERE source_id=s.id AND error IS NOT NULL) media_errors,(SELECT count(*) FROM issues WHERE source_id=s.id) scan_errors FROM sources s ORDER BY name")?
                 .query_map([], |r| { let ex:String=r.get("exclusions")?; Ok(Source {
-                    id:r.get("id")?,name:r.get("name")?,path:r.get("display_path")?,volume_id:r.get("volume")?,state:r.get("state")?,scan_state:r.get("scan_state")?,
+                    id:r.get("id")?,name:r.get("name")?,path:r.get("display_path")?,volume_id:r.get("volume")?,state:r.get("state")?,scan_state:r.get("scan_state")?,filesystem:r.get("filesystem")?,drive_kind:r.get("drive_kind")?,read_only:r.get("read_only")?,
                     total:r.get("total")?,errors:r.get::<_,i64>("media_errors")?+r.get::<_,i64>("scan_errors")?,media_errors:r.get("media_errors")?,scan_errors:r.get("scan_errors")?,last_scan:r.get("last_scan")?,exclusions:serde_json::from_str(&ex).unwrap_or_default() }) })?.collect::<rusqlite::Result<Vec<_>>>()?;
             let albums=c.prepare("SELECT a.id,a.name,count(m.asset_id) FROM albums a LEFT JOIN memberships m ON a.id=m.album_id GROUP BY a.id ORDER BY a.name")?.query_map([],|r|Ok(Album{id:r.get(0)?,name:r.get(1)?,count:r.get(2)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let (total,photos,videos,favorites,bytes,thumbnail_bytes) = c.query_row("SELECT count(*),coalesce(sum(kind='photo'),0),coalesce(sum(kind='video'),0),coalesce(sum(favorite),0),coalesce(sum(size),0),coalesce(sum(thumbnail_bytes),0) FROM assets",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get::<_,i64>(5)?)))?;

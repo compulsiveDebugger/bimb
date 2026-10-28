@@ -1,0 +1,32 @@
+name: Desktop compatibility
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace --locked
+      - name: FAT32 and exFAT disk images, including read-only sources
+        if: runner.os == 'macOS'
+        run: python3 scripts/test-drive-images.py
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build desktop host
+        run: cargo build -p bimb --release --locked

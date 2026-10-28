@@ -7,6 +7,30 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+mod windows;
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SourceInfo {
+    pub volume_id: String,
+    pub mount: PathBuf,
+    #[serde(default)]
+    pub filesystem: String,
+    #[serde(default)]
+    pub drive_kind: String,
+    pub read_only: Option<bool>,
+    #[serde(skip)]
+    pub root_key: String,
+}
+
+pub fn path_encoding() -> &'static str {
+    if cfg!(windows) {
+        "windows-utf16le"
+    } else {
+        "unix-bytes"
+    }
+}
+
 #[cfg(unix)]
 pub fn path_bytes(path: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
@@ -30,7 +54,9 @@ pub fn from_bytes(bytes: Vec<u8>) -> PathBuf {
     use std::os::windows::ffi::OsStringExt;
     std::ffi::OsString::from_wide(
         &bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|v| u16::from_le_bytes([v[0], v[1]]))
             .collect::<Vec<_>>(),
     )
@@ -46,9 +72,10 @@ pub fn private_dir(path: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub fn file_key(m: &std::fs::Metadata) -> String {
+pub fn file_key(path: &Path, m: &std::fs::Metadata) -> String {
     #[cfg(unix)]
     {
+        let _ = path;
         use std::os::unix::fs::MetadataExt;
         format!(
             "{}:{}",
@@ -60,28 +87,33 @@ pub fn file_key(m: &std::fs::Metadata) -> String {
                 .unwrap_or_default()
         )
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         let _ = m;
-        String::new()
+        windows::file_identity(path)
+            .map(|v| v.0)
+            .unwrap_or_default()
     }
 }
-pub fn device(m: &std::fs::Metadata) -> u64 {
+pub fn device(path: &Path, m: &std::fs::Metadata) -> u64 {
     #[cfg(unix)]
     {
+        let _ = path;
         use std::os::unix::fs::MetadataExt;
         m.dev()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
         let _ = m;
-        0
+        windows::file_identity(path)
+            .map(|v| v.1)
+            .unwrap_or_default()
     }
 }
-pub fn revision(m: &std::fs::Metadata) -> String {
+pub fn revision(path: &Path, m: &std::fs::Metadata) -> String {
     format!(
         "{}:{}:{}",
-        file_key(m),
+        file_key(path, m),
         m.len(),
         m.modified()
             .ok()
@@ -96,10 +128,28 @@ pub fn is_placeholder(m: &std::fs::Metadata) -> bool {
         use std::os::macos::fs::MetadataExt;
         m.st_flags() & 0x4000_0000 != 0
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // Offline/recall attributes: do not hydrate cloud files during a scan.
+        m.file_attributes() & (0x1000 | 0x40000 | 0x400000) != 0
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = m;
         false
+    }
+}
+
+pub fn is_link(m: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        m.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        m.file_type().is_symlink()
     }
 }
 
@@ -116,10 +166,16 @@ pub fn install_worker(home: &Path) -> Result<PathBuf> {
         std::fs::rename(temporary, &path)?;
         Ok(path)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
         let _ = home;
-        bail!("This preview currently supports macOS only")
+        // The desktop executable dispatches this mode before starting Tauri.
+        Ok(std::env::current_exe()?)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = home;
+        bail!("Bimb currently supports macOS and Windows")
     }
 }
 
@@ -131,7 +187,15 @@ pub fn worker(
     size: usize,
 ) -> Result<serde_json::Value> {
     let request = serde_json::json!({ "operation": operation, "path": STANDARD.encode(path_bytes(path)), "output": output, "maxSize": size });
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command
+            .arg("--bimb-media-worker")
+            .creation_flags(0x08000000);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -173,16 +237,82 @@ pub fn worker(
 }
 
 pub fn source_identity(executable: &Path, path: &Path) -> Result<(String, String)> {
+    let info = source_info(executable, path)?;
+    Ok((info.volume_id, info.root_key))
+}
+
+pub fn source_info(executable: &Path, path: &Path) -> Result<SourceInfo> {
     let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    if !metadata.is_dir() || is_link(&metadata) {
         bail!("Choose a real folder, not a symbolic link");
     }
-    let result = worker(executable, "source", path, None, 512)?;
-    let volume = result["volume_id"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .context("A local folder with a stable volume identity is required")?;
-    Ok((volume.to_owned(), file_key(&metadata)))
+    #[cfg(windows)]
+    let mut info = {
+        let _ = executable;
+        windows::source_info(path)?
+    };
+    #[cfg(not(windows))]
+    let mut info: SourceInfo =
+        serde_json::from_value(worker(executable, "source", path, None, 512)?)
+            .context("Could not identify this local drive")?;
+    info.root_key = file_key(path, &metadata);
+    if info.volume_id.is_empty() || info.root_key.is_empty() {
+        bail!("A local folder with a stable volume identity is required");
+    }
+    Ok(info)
+}
+
+/// Mount locations are observations; every reconnect candidate is verified by identity.
+pub fn mount_roots(volume: &str) -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        windows::mount_roots(volume)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = volume;
+        let mut roots = vec![PathBuf::from("/")];
+        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+            roots.extend(entries.flatten().take(128).map(|e| e.path()));
+        }
+        roots
+    }
+}
+
+/// Called before the host creates a window. Media decoding stays in a bounded subprocess.
+pub fn media_worker_main() -> bool {
+    #[cfg(windows)]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|s| s == "--bimb-media-worker")
+    {
+        windows::media_worker_main();
+        return true;
+    }
+    false
+}
+
+pub fn open_original(path: &Path, reveal: bool) -> Result<()> {
+    #[cfg(windows)]
+    {
+        windows::open_original(path, reveal)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("/usr/bin/open");
+        if reveal {
+            command.arg("-R");
+        }
+        if !command.arg(path).status()?.success() {
+            bail!("Could not open the original");
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (path, reveal);
+        bail!("Opening originals requires macOS or Windows")
+    }
 }
 
 pub fn checked_media(root: &Path, relative: &Path) -> Result<PathBuf> {
@@ -197,7 +327,7 @@ pub fn checked_media(root: &Path, relative: &Path) -> Result<PathBuf> {
     for part in relative.components() {
         current.push(part);
         let m = std::fs::symlink_metadata(&current)?;
-        if m.file_type().is_symlink() || is_placeholder(&m) {
+        if is_link(&m) || is_placeholder(&m) {
             bail!("Linked or undownloaded files are not opened");
         }
     }

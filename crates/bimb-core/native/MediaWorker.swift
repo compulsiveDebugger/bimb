@@ -46,6 +46,10 @@ func writeJPEG(_ image: CGImage, to path: String) throws {
                 }
                 result["volume_id"] = values.volumeUUIDString ?? ""
                 result["mount"] = values.volume?.path ?? "/"
+                let volumeValues = try url.resourceValues(forKeys: [.volumeLocalizedFormatDescriptionKey, .volumeIsInternalKey, .volumeIsReadOnlyKey])
+                result["filesystem"] = volumeValues.volumeLocalizedFormatDescription ?? ""
+                result["drive_kind"] = volumeValues.volumeIsInternal == true ? "internal" : "external"
+                result["read_only"] = volumeValues.volumeIsReadOnly
             } else {
                 let values = try url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
                 if values.isUbiquitousItem == true && values.ubiquitousItemDownloadingStatus != .current && values.ubiquitousItemDownloadingStatus != .downloaded {

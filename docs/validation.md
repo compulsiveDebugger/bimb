@@ -1,6 +1,15 @@
 # Apple Silicon preview validation
 
-10–11 October 2026, with scan-report and saved-collection validation on 28 October 2026. Local development preview; this is not a general availability or cross-platform certification.
+10–11 October 2026, with scan-report, saved-collection and drive-adapter validation on 28 October 2026. Local development preview; this is not a general availability or cross-platform certification.
+
+## Drive compatibility increment — 28 October
+
+- Schema 4 preserves schemas 1–3 and adds filesystem/drive/read-only details, volume-relative roots and native path provenance. Foreign-OS catalogs are rejected before their paths are interpreted; restore validates a staged copy before replacing the active catalog.
+- The macOS native suite passes 23 tests (plus one intentionally ignored mounted-image test). New checks cover source format/read-only observations, relative-root persistence, metadata and preview generation, rename identity/annotations, offline cached thumbnails, reconnect/rescan, lossless native path encodings, unique reconnect selection and ambiguous identities, schema-3 collections and foreign-path rejection. Existing native media/watcher tests also pass with OS-service access.
+- `npm run check`, `npm run build` and the 9.80 MiB macOS app bundle build pass. macOS and Windows-target core clippy passes with warnings denied. The Windows check includes all core test/example targets; it uses linked SQLite declarations to avoid requiring a Windows C compiler on the Mac. This is a Rust type/lint check, **not** a Windows executable build or runtime test.
+- The Windows host dispatches a bounded native media subprocess before creating the UI. WinRT/WIC provides image decoding, EXIF orientation, sRGB JPEG derivatives, image metadata/GPS, video metadata and OS video thumbnails. HEIC/HEVC require suitable installed codecs; in-webview playback remains a separate capability. Windows shell open/reveal and OS-specific development/build scripts are implemented.
+- A compatibility workflow builds and tests on macOS 26 and Windows, and runs synthetic FAT32/exFAT images on macOS. `scripts/test-drive-images.py` creates new temporary images and exercises writable/read-only scans without touching physical disks. The local image attempt was denied by macOS DiskImages services (`Operation not permitted`), including outside the restricted runner. It is **not** counted as passed filesystem validation.
+- Windows runtime/UI, physical NTFS/FAT/exFAT drives, changed Windows drive letters, physical hot unplug and full driver/codec combinations remain validation gates. A Windows USB SSD may report as a fixed device. FAT file IDs and coarse timestamps limit rename/replacement confidence; Bimb never guesses a rename when identity evidence changes.
 
 ## Environment and commands
 
@@ -50,7 +59,7 @@ On 11 October, the final native release displayed the HEIC cached thumbnail, cap
 - One background decode worker at a time, plus a separate serialized preview worker. Both are subprocesses with output limits and a 25-second deadline; images are downsampled using native codecs. This bounds concurrency, not a hard OS-enforced RAM ceiling.
 - Source scan state and discovered assets persist. Resume rewalks the source and skips unchanged completed work. Interrupted scans are visible for explicit resumption. A per-file durable queue and viewport-priority scheduling remain future refinements.
 - Filesystem notifications debounce for two seconds. Source availability refreshes every 30 seconds; a 15-minute reconciliation repairs missed watcher events. Pause/cancel is respected. Scans retry incomplete operations on a later rescan.
-- Relinks require the same volume UUID and root identity; a copied/replacement drive is a new source. Automatic remount lookup only handles unique matches below `/Volumes`.
+- Relinks require the same OS volume identifier and root identity; a copied/replacement drive is a new source. Reconnect candidates come from macOS mount roots or the original Windows volume's current drive-letter/mounted-folder paths, using the stored volume-relative root. Multiple verified matches remain ambiguous.
 - One SQLite actor serializes reads and writes. This is adequate for the measured 3,000-row workload; a dedicated read pool is not implemented.
 - Saved dynamic collections retain search text, combinable filters and sorting, with up to 100 named collections. Matching results update as catalog data changes; on-this-day collections also honor memory preferences and exclusions. Source/album filters retain their original IDs after removal, yielding no matches rather than broadening the search. A folder tree is not implemented. The error filter exposes media errors. Expand **Show scan issues** in a source card for affected source-relative paths and error details, fetched in pages of 100. Refresh the report during a scan; a rescan replaces prior issues. Old pathless issues are preserved through migration and gain details on rescan.
 - Image GPS is normalized; video location metadata is retained as raw text and is not yet available to the GPS filter. EXIF offsets are retained; date grouping uses recorded wall time, and filesystem-date fallbacks are excluded from memories unless overridden.
@@ -64,4 +73,4 @@ On 11 October, the final native release displayed the HEIC cached thumbnail, cap
 - Measure initial scan, warm rescan, UI latency and combined memory on the actual 3,000-file / 1 TB library.
 - Physical external-drive hot unplug/reconnect and filesystem-specific identity tests (including exFAT); source permission changes, app termination at commit boundaries, disk-full injection, and invalid/migration recovery scenarios.
 - Viewport-priority decoding and a full implementation review against the approved architecture before declaring the complete first release.
-- Public distribution requires signing/notarization and a license decision. Windows and Intel/macOS compatibility need their own native adapters and validation phase.
+- Public distribution requires signing/notarization and a license decision. The Windows adapter needs native runtime/packaging/UI validation; Intel/macOS needs its own native build and validation phase.

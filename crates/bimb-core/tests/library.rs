@@ -99,7 +99,7 @@ fn scan_issue_backups_restore_current_and_version_one_catalogs() {
     assert_eq!(page.issues[0].path.as_deref(), Some("旅行/locked"));
     assert_eq!(page.issues[0].message, "Permission denied");
     let db = rusqlite::Connection::open(&backup).unwrap();
-    db.execute_batch("DROP TABLE collections; DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); INSERT INTO issues(source_id,code) VALUES('source','folder_unreadable'); PRAGMA user_version=1;").unwrap();
+    db.execute_batch("ALTER TABLE sources DROP COLUMN relative_root; ALTER TABLE sources DROP COLUMN filesystem; ALTER TABLE sources DROP COLUMN drive_kind; ALTER TABLE sources DROP COLUMN read_only; DELETE FROM meta WHERE key='path_encoding'; DROP TABLE collections; DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); INSERT INTO issues(source_id,code) VALUES('source','folder_unreadable'); PRAGMA user_version=1;").unwrap();
     drop(db);
     lib.restore(&backup).unwrap();
     let page = lib.source_issues("source", None).unwrap();
@@ -151,7 +151,7 @@ fn collections_survive_backup_restore_and_export_and_restore_version_two() {
     assert!(data["collections"][0]["query"]["cursor"].is_null());
     // A real schema-2 backup has no collection table. Upgrade only the staged copy.
     let db = rusqlite::Connection::open(&backup).unwrap();
-    db.execute_batch("DROP TABLE collections; PRAGMA user_version=2;")
+    db.execute_batch("ALTER TABLE sources DROP COLUMN relative_root; ALTER TABLE sources DROP COLUMN filesystem; ALTER TABLE sources DROP COLUMN drive_kind; ALTER TABLE sources DROP COLUMN read_only; DELETE FROM meta WHERE key='path_encoding'; DROP TABLE collections; PRAGMA user_version=2;")
         .unwrap();
     drop(db);
     lib.restore(&backup).unwrap();

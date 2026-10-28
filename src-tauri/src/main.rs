@@ -209,23 +209,7 @@ async fn open_original(lib: State<'_, Library>, id: String, reveal: bool) -> Res
     let lib = lib.inner().clone();
     work(move || {
         let path = lib.original(&id)?;
-        #[cfg(target_os = "macos")]
-        {
-            let mut command = std::process::Command::new("/usr/bin/open");
-            if reveal {
-                command.arg("-R");
-            }
-            command.arg(&path);
-            if !command.status()?.success() {
-                anyhow::bail!("Could not open the original");
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (path, reveal);
-            anyhow::bail!("Opening originals is not implemented on this platform yet");
-        }
-        Ok(())
+        bimb_core::platform::open_original(&path, reveal)
     })
     .await
 }
@@ -335,6 +319,9 @@ fn parse_range(header: Option<&str>, length: u64) -> anyhow::Result<(u64, u64)> 
     ))
 }
 fn main() {
+    if bimb_core::platform::media_worker_main() {
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

@@ -8,7 +8,7 @@
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "desktop": "node scripts/desktop.mjs dev",
-    "desktop:build": "node scripts/desktop.mjs build --bundles app",
+    "desktop:build": "node scripts/desktop.mjs build",
     "test:core": "sh scripts/cargo.sh test -p bimb-core"
   },
   "dependencies": {
