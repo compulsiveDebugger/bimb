@@ -250,7 +250,7 @@ fn version_one_catalogs_preserve_legacy_issues_and_upgrade_once() {
     let path = tmp.path().join("catalog.sqlite");
     let db = rusqlite::Connection::open(&path).unwrap();
     db.execute_batch(bimb_core::catalog::SCHEMA).unwrap();
-    db.execute_batch("DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
+    db.execute_batch("DROP TABLE collections; DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); PRAGMA user_version=1;").unwrap();
     db.execute("INSERT INTO sources(id,name,path,display_path,volume,root_key) VALUES('source','Holiday',X'2F','/','volume','root')", []).unwrap();
     db.execute(
         "INSERT INTO issues(source_id,code) VALUES('source','folder_unreadable')",
@@ -275,5 +275,223 @@ fn version_one_catalogs_preserve_legacy_issues_and_upgrade_once() {
             .unwrap()
             .total,
         1
+    );
+}
+
+#[test]
+fn saved_collections_recompute_matches_and_preserve_filters_after_reopen() {
+    let (tmp, c) = seeded();
+    let id = c
+        .save_collection(
+            String::new(),
+            "  Family in Goa  ".into(),
+            Query {
+                text: "family".into(),
+                source: "source".into(),
+                place: "Goa".into(),
+                favorites: true,
+                sort: "name".into(),
+                ascending: true,
+                cursor: Some("stale page".into()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let collection = c.overview().unwrap().collections.remove(0);
+    assert_eq!(collection.name, "Family in Goa");
+    assert!(collection.query.cursor.is_none());
+    assert_eq!(collection.query.limit, Query::default().limit);
+    assert_eq!(c.query(collection.query.clone()).unwrap().total, 0);
+    for asset in ["a", "b"] {
+        c.annotate(
+            asset.into(),
+            Annotation {
+                favorite: true,
+                place: "Goa".into(),
+                tags: vec!["family".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let page = c.query(collection.query.clone()).unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.assets[0].id, "a");
+    c.annotate("a".into(), Annotation::default()).unwrap();
+    assert_eq!(c.query(collection.query.clone()).unwrap().total, 1);
+    // Newly indexed rows become matches without editing a collection membership.
+    c.call(|db| {
+        db.execute("INSERT INTO assets(id,source_id,path,filename,folder,file_key,revision,kind,size,modified,added,seen,favorite,place,tags) VALUES('d','source',X'64','another.jpg','Trip','d','r1','photo',100,'2025-01-01','2026-01-01',1,1,'Goa','[\"family\"]')", [])?;
+        Ok(())
+    }).unwrap();
+    assert_eq!(c.query(collection.query).unwrap().total, 2);
+    let reopened = Catalog::open(&tmp.path().join("catalog.sqlite")).unwrap();
+    let saved = reopened.overview().unwrap().collections.remove(0);
+    assert_eq!(saved.id, id);
+    assert_eq!(saved.query.text, "family");
+    assert!(saved.query.ascending);
+    assert_eq!(
+        reopened.query(saved.query.clone()).unwrap().assets[0].id,
+        "d"
+    );
+    // Removing a source must not silently widen the search to the entire library.
+    reopened
+        .call(|db| {
+            db.execute("DELETE FROM sources WHERE id='source'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(reopened.query(saved.query).unwrap().total, 0);
+    assert_eq!(reopened.overview().unwrap().collections.len(), 1);
+}
+
+#[test]
+fn collection_edits_validate_input_and_never_change_media_or_albums() {
+    let (_tmp, c) = seeded();
+    c.call(|db| {
+        db.execute("INSERT INTO albums VALUES('album','Holiday')", [])?;
+        db.execute("INSERT INTO memberships VALUES('album','a',1)", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let query = Query {
+        text: "旅行".into(),
+        source: "source".into(),
+        kind: "video".into(),
+        favorites: true,
+        availability: "offline".into(),
+        date_from: "2024-02-29".into(),
+        date_to: "2025-01-01".into(),
+        place: "Goa".into(),
+        folder: "Trip".into(),
+        album: "album".into(),
+        memory: true,
+        errors: true,
+        gps: true,
+        sort: "duration".into(),
+        ascending: true,
+        ..Default::default()
+    };
+    let id = c
+        .save_collection(String::new(), "旅行".into(), query.clone())
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&c.overview().unwrap().collections[0].query).unwrap(),
+        serde_json::to_value(&query).unwrap()
+    );
+    assert!(
+        c.save_collection(String::new(), "旅行".into(), Query::default())
+            .is_err()
+    );
+    assert!(
+        c.save_collection(String::new(), " ".into(), Query::default())
+            .is_err()
+    );
+    assert!(
+        c.save_collection(String::new(), "x".repeat(129), Query::default())
+            .is_err()
+    );
+    for invalid in [
+        Query {
+            text: "x".repeat(1025),
+            ..Default::default()
+        },
+        Query {
+            date_from: "2025-02-29".into(),
+            ..Default::default()
+        },
+        Query {
+            date_from: "2025-01-01".into(),
+            date_to: "2024-01-01".into(),
+            ..Default::default()
+        },
+        Query {
+            sort: "unsupported".into(),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            c.save_collection(id.clone(), "Invalid replacement".into(), invalid)
+                .is_err()
+        );
+    }
+    assert_eq!(c.overview().unwrap().collections[0].name, "旅行");
+    assert!(
+        c.save_collection("missing".into(), "Missing".into(), Query::default())
+            .is_err()
+    );
+    c.save_collection(
+        id.clone(),
+        "Renamed".into(),
+        Query {
+            album: "album".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let saved = c.overview().unwrap().collections.remove(0);
+    assert_eq!(saved.id, id);
+    assert_eq!(saved.name, "Renamed");
+    assert_eq!(c.query(saved.query.clone()).unwrap().total, 1);
+    c.call(|db| {
+        db.execute("DELETE FROM albums WHERE id='album'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(c.query(saved.query).unwrap().total, 0);
+    c.delete_collection(id.clone()).unwrap();
+    assert!(c.delete_collection(id).is_err());
+    assert!(c.overview().unwrap().collections.is_empty());
+    assert_eq!(c.query(Query::default()).unwrap().total, 3);
+}
+
+#[test]
+fn version_two_catalogs_gain_collections_without_changing_existing_organization() {
+    let (tmp, c) = seeded();
+    c.annotate(
+        "a".into(),
+        Annotation {
+            favorite: true,
+            caption: "Keep me".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    c.call(|db| {
+        db.execute_batch("INSERT INTO albums VALUES('album','Holiday'); INSERT INTO memberships VALUES('album','a',1); INSERT INTO issues(source_id,code,message) VALUES('source','folder_unreadable','Permission denied'); DROP TABLE collections; PRAGMA user_version=2;")?;
+        Ok(())
+    }).unwrap();
+    let migrated = Catalog::open(&tmp.path().join("catalog.sqlite")).unwrap();
+    let overview = migrated.overview().unwrap();
+    assert!(overview.collections.is_empty());
+    assert_eq!(overview.albums[0].count, 1);
+    assert_eq!(overview.favorites, 1);
+    assert_eq!(
+        migrated.source_issues("source", None).unwrap().issues[0].message,
+        "Permission denied"
+    );
+    let id = migrated
+        .save_collection(
+            String::new(),
+            "Favorites".into(),
+            Query {
+                favorites: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let again = Catalog::open(&tmp.path().join("catalog.sqlite")).unwrap();
+    assert_eq!(again.overview().unwrap().collections[0].id, id);
+    assert_eq!(
+        again
+            .query(Query {
+                favorites: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .assets[0]
+            .caption,
+        "Keep me"
     );
 }

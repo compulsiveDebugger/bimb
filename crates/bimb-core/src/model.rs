@@ -150,6 +150,12 @@ pub struct Album {
     pub count: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    pub query: Query,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub thumbnail_budget: u64,
     pub memories_enabled: bool,
@@ -168,6 +174,7 @@ impl Default for Settings {
 pub struct Overview {
     pub sources: Vec<Source>,
     pub albums: Vec<Album>,
+    pub collections: Vec<Collection>,
     pub settings: Settings,
     pub total: i64,
     pub photos: i64,

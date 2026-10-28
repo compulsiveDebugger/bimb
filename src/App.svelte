@@ -1,23 +1,27 @@
 <script lang="ts">
-  import {onMount} from 'svelte';
+  import {onMount,tick} from 'svelte';
   import {focusTrap} from './lib/focus';
   import {Grid2X2,Clock3,Heart,Album as AlbumIcon,HardDrive,Plus,Search,SlidersHorizontal,Settings as SettingsIcon,ShieldCheck,ArrowUpDown,FolderOpen,X,ChevronLeft,ChevronRight,Play,Pause,RefreshCw,MapPin,Image,Video,Download,ExternalLink,Check,AlertCircle,Sun,ArrowRight,Info,Folder,Trash2,Link,CheckCircle2} from 'lucide-svelte';
   import MediaGrid from './lib/MediaGrid.svelte';
   import SourceIssues from './lib/SourceIssues.svelte';
   import {call,desktop,media} from './lib/api';
-  import {defaultQuery,emptyOverview,bytes,date,duration,type Asset,type Annotation,type Overview,type Page,type Source} from './lib/types';
+  import {defaultQuery,emptyOverview,bytes,date,duration,type Asset,type Annotation,type Overview,type Page,type Query,type Source} from './lib/types';
   let overview=$state<Overview>(emptyOverview()),q=$state(defaultQuery()),assets=$state<Asset[]>([]),total=$state(0),cursor=$state<string|null>(null);
   let view=$state('library'),loading=$state(false),busy=$state(false),error=$state(''),notice=$state(''),filters=$state(false),searchInput=$state('');
   let selected=$state<Asset|null>(null),annotation=$state<Annotation>({favorite:false,caption:'',tags:[],place:'',date_override:'',exclude_memory:false}),tagsInput=$state('');
-  let modal=$state<''|'sources'|'settings'|'album'>(''),albumName=$state(''),sourceEdit=$state<Source|null>(null),sourceName=$state(''),sourceExclusions=$state('');
+  let modal=$state<''|'sources'|'settings'|'album'|'collection'>(''),albumName=$state(''),sourceEdit=$state<Source|null>(null),sourceName=$state(''),sourceExclusions=$state('');
+  let collectionId=$state(''),collectionEditId=$state(''),collectionName=$state(''),collectionQuery=$state(defaultQuery()),savingCollection=$state(false);
   let budget=$state(1024),memoriesEnabled=$state(true),excludedFrom=$state(''),excludedTo=$state(''),excludedDates=$state<[string,string][]>([]);
   let previewFailed=$state(false),playbackFailed=$state(false),confirmAction=$state<{title:string;body:string;run:()=>Promise<void>}|null>(null);
   let generation=0,searchTimer:ReturnType<typeof setTimeout>,noticeTimer:ReturnType<typeof setTimeout>;
-  let heading=$derived(view==='memories'?'A little trip back':view==='favorites'?'Your favorites':view==='timeline'?'Through the years':view==='album'?(overview.albums.find(a=>a.id===q.album)?.name??'Album'):view==='source'?(overview.sources.find(s=>s.id===q.source)?.name??'Source'):'Your library');
+  let activeCollection=$derived(view==='collection'?overview.collections.find(c=>c.id===collectionId):undefined);
+  let collectionDirty=$derived(!!activeCollection&&queryKey(activeCollection.query)!==queryKey({...q,text:searchInput}));
+  let heading=$derived(view==='collection'?(activeCollection?.name??'Collection'):view==='memories'?'A little trip back':view==='favorites'?'Your favorites':view==='timeline'?'Through the years':view==='album'?(overview.albums.find(a=>a.id===q.album)?.name??'Album'):view==='source'?(overview.sources.find(s=>s.id===q.source)?.name??'Source'):'Your library');
   let scanning=$derived(overview.sources.some(s=>['scanning','queued'].includes(s.scan_state)));
-  let hasFilters=$derived(Boolean(q.kind||q.availability||q.date_from||q.date_to||q.place||q.folder||q.errors||q.gps));
+  let hasFilters=$derived(Boolean(q.source||q.album||q.favorites||q.memory||q.kind||q.availability||q.date_from||q.date_to||q.place||q.folder||q.errors||q.gps));
+  function queryKey(query:Query){return JSON.stringify({...defaultQuery(),...query,cursor:null,limit:120});}
   function message(text:string){notice=text;clearTimeout(noticeTimer);noticeTimer=setTimeout(()=>notice='',5000);}
-  async function guard(fn:()=>Promise<void>){try{error='';await fn();}catch(e){error=String(e).replace(/^Error: /,'');}}
+  async function guard(fn:()=>Promise<void>,clearError=true){try{if(clearError)error='';await fn();}catch(e){error=String(e).replace(/^Error: /,'');}}
   async function refresh(){if(!desktop)return;overview=await call<Overview>('overview');}
   async function refreshViewer(){
     const id=selected?.id;if(!id)return;
@@ -34,11 +38,33 @@
     finally{if(ticket===generation)loading=false;}
   }
   function navigate(next:string,id=''){
-    view=next;searchInput='';q={...defaultQuery(),favorites:next==='favorites',memory:next==='memories',source:next==='source'?id:'',album:next==='album'?id:''};
+    clearTimeout(searchTimer);
+    const collection=next==='collection'?overview.collections.find(c=>c.id===id):undefined;
+    view=next;collectionId=collection?.id??'';
+    q=collection?{...defaultQuery(),...collection.query,cursor:null,limit:120}:{...defaultQuery(),favorites:next==='favorites',memory:next==='memories',source:next==='source'?id:'',album:next==='album'?id:''};
+    searchInput=q.text;
     selected=null;void load();
   }
-  function filterChanged(){void load();}
-  function search(){clearTimeout(searchTimer);searchTimer=setTimeout(()=>{q.text=searchInput;void load();},220);}
+  async function filterChanged(){clearTimeout(searchTimer);q.text=searchInput;await tick();await load();}
+  function search(event:Event){clearTimeout(searchTimer);searchInput=(event.currentTarget as HTMLInputElement).value;q.text=searchInput;searchTimer=setTimeout(()=>void load(),220);}
+  function editCollection(update=false){
+    clearTimeout(searchTimer);q.text=searchInput;void load();
+    collectionEditId=update?collectionId:'';collectionName=update?(activeCollection?.name??''):'';
+    collectionQuery={...q,cursor:null,limit:120};error='';modal='collection';
+  }
+  async function saveCollection(){
+    if(savingCollection)return;savingCollection=true;
+    try{await guard(async()=>{
+      const id=await call<string>('save_collection',{id:collectionEditId,name:collectionName,query:collectionQuery});
+      await refresh();modal='';navigate('collection',id);message('Collection saved. Matching moments update automatically.');
+    });}finally{savingCollection=false;}
+  }
+  function deleteCollection(){
+    const id=collectionId;
+    confirm('Delete this collection?','Its saved search is removed. Your photos, videos, albums and annotations stay in your library.',async()=>{
+      await call('delete_collection',{id});await refresh();navigate('library');
+    });
+  }
   async function addSource(){busy=true;await guard(async()=>{const id=await call<string|null>('add_source');if(id){await refresh();navigate('source',id);message('Folder connected. Your library is taking shape.');}});busy=false;}
   function open(asset:Asset){selected=asset;annotation={favorite:asset.favorite,caption:asset.caption,tags:[...asset.tags],place:asset.place,date_override:asset.date_override,exclude_memory:asset.exclude_memory};tagsInput=asset.tags.join(', ');previewFailed=false;playbackFailed=false;}
   async function favorite(asset:Asset){await guard(async()=>{await call('annotate',{id:asset.id,annotation:{favorite:!asset.favorite,caption:asset.caption,tags:asset.tags,place:asset.place,date_override:asset.date_override,exclude_memory:asset.exclude_memory}});if(selected?.id===asset.id){selected={...selected,favorite:!asset.favorite};annotation.favorite=!asset.favorite;}await refresh();await load();});}
@@ -52,13 +78,13 @@
   async function addToAlbum(id:string){if(!selected||!id)return;await guard(async()=>{await call('album',{action:'add',id,name:'',assetIds:[selected!.id]});await refresh();message('Added to album.');});}
   function confirm(title:string,body:string,run:()=>Promise<void>){confirmAction={title,body,run};}
   function key(event:KeyboardEvent){
-    if(event.key==='Escape'){if(confirmAction)confirmAction=null;else if(modal)modal='';else selected=null;}
+    if(event.key==='Escape'){if(confirmAction)confirmAction=null;else if(modal&&!savingCollection)modal='';else if(!modal)selected=null;}
     if(event.target instanceof HTMLInputElement||event.target instanceof HTMLTextAreaElement||event.target instanceof HTMLSelectElement)return;
     if(selected&&event.key==='ArrowRight')move(1);if(selected&&event.key==='ArrowLeft')move(-1);
   }
   onMount(()=>{
     void guard(async()=>{await refresh();await load();});
-    const progress=setInterval(()=>{if(!desktop)return;void guard(async()=>{const wasScanning=scanning;const before=JSON.stringify(overview.sources);await refresh();if(wasScanning||scanning||before!==JSON.stringify(overview.sources)){if(selected)await refreshViewer();else await load();}});},2000);
+    const progress=setInterval(()=>{if(!desktop)return;void guard(async()=>{const wasScanning=scanning;const before=JSON.stringify(overview.sources);await refresh();if(wasScanning||scanning||before!==JSON.stringify(overview.sources)){if(selected)await refreshViewer();else await load();}},false);},2000);
     return()=>{clearInterval(progress);clearTimeout(searchTimer);clearTimeout(noticeTimer);};
   });
 </script>
@@ -75,34 +101,41 @@
       <button class:active={view==='memories'} onclick={()=>navigate('memories')}><Sun size={18}/>Memories</button>
     </nav>
     <div class="section-label">YOUR ALBUMS<button class="icon-button" title="Create album" onclick={()=>{albumName='';modal='album';}}><Plus size={15}/></button></div>
-    <nav aria-label="Albums">{#each overview.albums as album}<button class:active={q.album===album.id} onclick={()=>navigate('album',album.id)}><AlbumIcon size={17}/><span class="nav-name">{album.name}</span><span>{album.count}</span></button>{/each}</nav>
+    <nav aria-label="Albums">{#each overview.albums as album}<button class:active={view==='album'&&q.album===album.id} onclick={()=>navigate('album',album.id)}><AlbumIcon size={17}/><span class="nav-name">{album.name}</span><span>{album.count}</span></button>{/each}</nav>
     {#if !overview.albums.length}<p class="sidebar-hint">Make a little collection<br/>of something you love.</p>{/if}
+    <div class="section-label">SAVED COLLECTIONS<button class="icon-button" title="Save current search as a collection" onclick={()=>editCollection()}><Plus size={15}/></button></div>
+    <nav aria-label="Saved collections">{#each overview.collections as collection}<button class:active={view==='collection'&&collectionId===collection.id} onclick={()=>navigate('collection',collection.id)}><Search size={17}/><span class="nav-name">{collection.name}</span></button>{/each}</nav>
+    {#if !overview.collections.length}<p class="sidebar-hint">Save a search to revisit it.<br/>New matches appear automatically.</p>{/if}
     <div class="section-label">CONNECTED FOLDERS<button class="icon-button" title="Manage sources" onclick={()=>modal='sources'}><SlidersHorizontal size={14}/></button></div>
-    <nav aria-label="Sources">{#each overview.sources as source}<button class:active={q.source===source.id} onclick={()=>navigate('source',source.id)}><HardDrive size={17}/><span class="nav-name">{source.name}</span><i class:online={source.state==='online'} class="status-dot" title={source.state}></i></button>{/each}</nav>
+    <nav aria-label="Sources">{#each overview.sources as source}<button class:active={view==='source'&&q.source===source.id} onclick={()=>navigate('source',source.id)}><HardDrive size={17}/><span class="nav-name">{source.name}</span><i class:online={source.state==='online'} class="status-dot" title={source.state}></i></button>{/each}</nav>
     <button class="add-folder-link" onclick={addSource} disabled={busy}><Plus size={16}/>Add a folder or drive</button>
     <div class="sidebar-bottom"><div class="privacy-card"><ShieldCheck size={20}/><div><strong>Yours. Always.</strong><p>On your drives. On your terms.</p></div></div><button class="settings-button" onclick={settings}><SettingsIcon size={17}/>Preferences<span class="version">v0.1</span></button></div>
   </aside>
 
   <main>
-    <header class="topbar"><div class="breadcrumbs">Your space<span>/</span>{view==='source'?'Folders':view==='album'?'Albums':'Library'}</div><div class="local-badge"><span></span>Private & offline</div></header>
+    <header class="topbar"><div class="breadcrumbs">Your space<span>/</span>{view==='collection'?'Saved collections':view==='source'?'Folders':view==='album'?'Albums':'Library'}</div><div class="local-badge"><span></span>Private & offline</div></header>
     {#if !desktop}<div class="preview-banner">Interface preview · Launch with <code>npm run desktop</code> to connect your library.</div>{/if}
     <div class="page-header"><div><p class="eyebrow">{view==='memories'?'SOME THINGS ARE WORTH ANOTHER LOOK':'COLLECTED BY YOU. KEPT FOR YOU.'}</p><h1>{heading}</h1><p class="subtitle">{view==='memories'?'Moments from this day, in years gone by.':overview.total?`${overview.photos.toLocaleString()} photos · ${overview.videos.toLocaleString()} videos · ${bytes(overview.bytes)} of memories`:'A lifetime of moments. A place to find them.'}</p></div><button class="primary" onclick={addSource} disabled={busy}><Plus size={17}/>{busy?'Choosing folder…':'Add folder'}</button></div>
     {#if error}<div class="error-notice" role="alert"><AlertCircle size={18}/><span>{error}</span><button class="icon-button" aria-label="Dismiss error" onclick={()=>error=''}><X size={16}/></button></div>{/if}
     {#if notice}<div class="success-notice" role="status"><CheckCircle2 size={17}/>{notice}</div>{/if}
-    {#if overview.total||overview.sources.length}
+    {#if overview.total||overview.sources.length||view==='collection'}
       <div class="toolbar"><label class="search-box"><Search size={18}/><input aria-label="Search your library" placeholder="Search filenames, tags, places…" bind:value={searchInput} oninput={search}/><kbd>⌕</kbd></label><button class:chosen={hasFilters} class="secondary" onclick={()=>filters=!filters}><SlidersHorizontal size={16}/>Filters{#if hasFilters}<i class="filter-dot"></i>{/if}</button><div class="sort-control"><ArrowUpDown size={15}/><select aria-label="Sort media" bind:value={q.sort} onchange={filterChanged}><option value="capture">Date captured</option><option value="added">Date added</option><option value="name">Filename</option><option value="size">File size</option><option value="duration">Duration</option></select><button class="icon-button" title={q.ascending?'Ascending':'Descending'} onclick={()=>{q.ascending=!q.ascending;filterChanged();}}>{q.ascending?'↑':'↓'}</button></div></div>
       {#if filters}<div class="filter-panel">
+        <label>Source<select bind:value={q.source} onchange={filterChanged}><option value="">All sources</option>{#if q.source&&!overview.sources.some(s=>s.id===q.source)}<option value={q.source}>Removed source</option>{/if}{#each overview.sources as source}<option value={source.id}>{source.name}</option>{/each}</select></label>
+        <label>Album<select bind:value={q.album} onchange={filterChanged}><option value="">All albums</option>{#if q.album&&!overview.albums.some(a=>a.id===q.album)}<option value={q.album}>Removed album</option>{/if}{#each overview.albums as album}<option value={album.id}>{album.name}</option>{/each}</select></label>
         <label>Media<select bind:value={q.kind} onchange={filterChanged}><option value="">Photos & videos</option><option value="photo">Photos</option><option value="video">Videos</option></select></label>
-        <label>Availability<select bind:value={q.availability} onchange={filterChanged}><option value="">All originals</option><option value="present">Available</option><option value="offline">Drive offline</option><option value="missing">File missing</option></select></label>
+        <label>Availability<select bind:value={q.availability} onchange={filterChanged}><option value="">All originals</option><option value="present">Available</option><option value="offline">Drive offline</option><option value="missing">File missing</option><option value="unavailable">Source unavailable</option><option value="ambiguous">Source needs relinking</option></select></label>
         <label>From<input type="date" bind:value={q.date_from} onchange={filterChanged}/></label><label>Until<input type="date" bind:value={q.date_to} onchange={filterChanged}/></label>
-        <label>Place<select bind:value={q.place} onchange={filterChanged}><option value="">All places</option>{#each overview.places as place}<option>{place}</option>{/each}</select></label>
-        <label>Folder<select bind:value={q.folder} onchange={filterChanged}><option value="">All folders</option>{#each overview.folders as folder}<option>{folder}</option>{/each}</select></label>
+        <label>Place<select bind:value={q.place} onchange={filterChanged}><option value="">All places</option>{#if q.place&&!overview.places.includes(q.place)}<option>{q.place}</option>{/if}{#each overview.places as place}<option>{place}</option>{/each}</select></label>
+        <label>Folder<select bind:value={q.folder} onchange={filterChanged}><option value="">All folders</option>{#if q.folder&&!overview.folders.includes(q.folder)}<option>{q.folder}</option>{/if}{#each overview.folders as folder}<option>{folder}</option>{/each}</select></label>
+        <label class="checkbox"><input type="checkbox" bind:checked={q.favorites} onchange={filterChanged}/>Favorites only</label><label class="checkbox"><input type="checkbox" bind:checked={q.memory} onchange={filterChanged}/>On this day</label>
         <label class="checkbox"><input type="checkbox" bind:checked={q.gps} onchange={filterChanged}/>Has GPS</label><label class="checkbox"><input type="checkbox" bind:checked={q.errors} onchange={filterChanged}/>Needs attention</label>
-        <button class="text-button" onclick={()=>{q={...defaultQuery(),text:q.text,source:q.source,album:q.album,favorites:q.favorites,memory:q.memory};filterChanged();}}>Reset filters</button>
+        <button class="text-button" onclick={()=>{q={...defaultQuery(),text:q.text,source:view==='source'?q.source:'',album:view==='album'?q.album:'',favorites:view==='favorites',memory:view==='memories'};filterChanged();}}>Reset filters</button>
       </div>{/if}
+      <div class="collection-actions"><button class="text-button" onclick={()=>editCollection()}><Plus size={13}/>Save as collection</button>{#if activeCollection}<button class="text-button" onclick={()=>editCollection(true)}>Edit collection</button><button class="text-button" onclick={deleteCollection}>Delete collection</button>{#if collectionDirty}<span>Unsaved filter changes</span><button class="text-button" onclick={()=>navigate('collection',collectionId)}>Reset to saved</button>{:else}<span>Updates automatically</span>{/if}{/if}</div>
       <div class="results-meta"><span>{total.toLocaleString()} {total===1?'moment':'moments'}{#if loading}<span class="loading-dot"></span>{/if}</span><div>{#if view==='album'}<button class="text-button" onclick={()=>confirm('Delete this album?','The photos and videos stay in your library.',async()=>{await call('album',{action:'delete',id:q.album,name:'',assetIds:[]});await refresh();navigate('library');})}>Delete album</button>{/if}{#if scanning}<span class="scan-badge"><span class="loading-dot"></span>Gathering your moments</span>{:else}<span class="quiet">Originals stay in their folders</span>{/if}</div></div>
     {/if}
-    {#if !overview.sources.length}
+    {#if !overview.sources.length&&view!=='collection'}
       <section class="welcome"><div class="welcome-art" aria-hidden="true"><div class="art-card back"><div class="art-sun"></div><div class="art-hill"></div></div><div class="art-card front"><svg viewBox="0 0 240 185" fill="none"><rect width="240" height="185" fill="#d6ddd0"/><circle cx="176" cy="48" r="21" fill="#f4ddb1"/><path d="M0 122L66 48L147 144L195 96L240 136V185H0Z" fill="#a1b4a1"/><path d="M0 161L93 95L174 162L240 126V185H0Z" fill="#708f78"/><path d="M0 185L92 143L165 185" fill="#486b58"/></svg><div class="art-caption">somewhere worth remembering</div></div><div class="art-leaf">✳</div></div><p class="eyebrow">START WITH A FOLDER</p><h2>Your memories already have a home.<br/>Now give them a library.</h2><p>Connect a folder or external drive. Bimb brings your photos<br/>and videos together, while keeping every original right where it is.</p><button class="primary large" onclick={addSource} disabled={busy}><FolderOpen size={19}/>Choose your first folder<ArrowRight size={17}/></button><div class="welcome-promises"><span><ShieldCheck size={15}/>No account. No cloud.</span><span><HardDrive size={15}/>Your originals stay untouched</span></div></section>
     {:else if !assets.length}
       <section class="empty-results">{#if view==='memories'}<Sun size={38} strokeWidth={1}/><h2>{overview.settings.memories_enabled?'No memories for today.':'Memories are taking a rest.'}</h2><p>{overview.settings.memories_enabled?'Only known capture dates are used. Correct a date in the details panel, or come back another day.':'You can turn memories back on in Preferences.'}</p>{:else if scanning}<RefreshCw size={32} class="spin"/><h2>Your library is taking shape.</h2><p>Browse as soon as the first files are indexed. You can pause at any time.</p>{:else}<Search size={36} strokeWidth={1}/><h2>No moments here yet.</h2><p>Try another search or filter, or connect a folder with photos and videos.</p>{/if}</section>
@@ -139,8 +172,9 @@
 {/if}
 
 {#if modal}
-  <div class="modal-backdrop"><div class:wide={modal==='sources'} class="modal" use:focusTrap inert={!!confirmAction} role="dialog" aria-modal="true" aria-label={modal} tabindex="-1"><button class="modal-close icon-button" aria-label="Close dialog" onclick={()=>{modal='';sourceEdit=null;}}><X size={20}/></button>
-    {#if modal==='album'}<p class="eyebrow">A LITTLE COLLECTION</p><h2>Create an album</h2><p class="muted">Gather moments together without moving a single file.</p><label>Album name<input bind:value={albumName} placeholder="e.g. Slow summer days" maxlength="128"/></label><button class="primary" disabled={!albumName.trim()} onclick={()=>guard(async()=>{const id=await call<string>('album',{action:'create',id:'',name:albumName,assetIds:[]});modal='';await refresh();navigate('album',id);})}><Plus size={16}/>Create album</button>
+  <div class="modal-backdrop"><div class:wide={modal==='sources'} class="modal" use:focusTrap inert={!!confirmAction} role="dialog" aria-modal="true" aria-label={modal} tabindex="-1"><button class="modal-close icon-button" aria-label="Close dialog" disabled={savingCollection} onclick={()=>{modal='';sourceEdit=null;}}><X size={20}/></button>
+    {#if modal==='collection'}<p class="eyebrow">ALWAYS SOMETHING TO COME BACK TO</p><h2>{collectionEditId?'Edit collection':'Save a collection'}</h2><p class="muted">Save your current search, filters and sort order. Matching moments update automatically as your library changes.</p><form onsubmit={(event)=>{event.preventDefault();void saveCollection();}}><label>Collection name<input bind:value={collectionName} placeholder="e.g. Summers in Goa" maxlength="128" required disabled={savingCollection}/></label><p class="muted">{collectionEditId?'Saving replaces this collection’s name and filters with your current choices.':'Your photos and videos stay in their folders.'}</p><button class="primary" type="submit" disabled={!collectionName.trim()||savingCollection}><Check size={16}/>{savingCollection?'Saving…':collectionEditId?'Save changes':'Save collection'}</button></form>
+    {:else if modal==='album'}<p class="eyebrow">A LITTLE COLLECTION</p><h2>Create an album</h2><p class="muted">Gather moments together without moving a single file.</p><label>Album name<input bind:value={albumName} placeholder="e.g. Slow summer days" maxlength="128"/></label><button class="primary" disabled={!albumName.trim()} onclick={()=>guard(async()=>{const id=await call<string>('album',{action:'create',id:'',name:albumName,assetIds:[]});modal='';await refresh();navigate('album',id);})}><Plus size={16}/>Create album</button>
     {:else if modal==='sources'}<p class="eyebrow">RIGHT WHERE YOU LEFT THEM</p><h2>Your folders & drives</h2><p class="muted">Disconnect a drive whenever you need to. Its catalog and thumbnails stay here.</p>
       <div class="source-list">{#each overview.sources as source (source.id)}<article class="source-card"><div class="source-card-top"><HardDrive size={23}/><div><h3>{source.name}</h3><p class="path">{source.path}</p></div><span class:connected={source.state==='online'} class="source-state">{source.state}</span></div><div class="source-stats">{source.total.toLocaleString()} moments · {source.scan_state}{#if source.media_errors} · {source.media_errors} media errors{/if}{#if source.scan_errors} · {source.scan_errors} scan issues{/if}</div>
         <div class="source-actions"><button class="secondary small" onclick={()=>scan(source.id,'resume')}><RefreshCw size={13}/>{['paused','cancelled','interrupted'].includes(source.scan_state)?'Resume':'Rescan'}</button>{#if ['scanning','queued','paused'].includes(source.scan_state)}<button class="secondary small" onclick={()=>scan(source.id,source.scan_state==='paused'?'resume':'pause')}><Pause size={13}/>{source.scan_state==='paused'?'Resume':'Pause'}</button><button class="text-button" onclick={()=>scan(source.id,'cancel')}>Cancel</button>{/if}<button class="text-button" onclick={()=>sourceOperation('relink_source',source.id)}><Link size={13}/>Relink</button><button class="text-button" onclick={()=>editSource(source)}>Edit</button><button class="text-button danger" onclick={()=>confirm(`Remove ${source.name}?`,'This removes its catalog entries, album memberships, annotations and thumbnails. An automatic catalog backup is saved first. Original media stays untouched.',async()=>{await call('remove_source',{id:source.id});await refresh();navigate('library');})}>Remove</button></div>

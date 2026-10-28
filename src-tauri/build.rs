@@ -10,6 +10,8 @@ fn main() {
             "refresh_sources",
             "annotate",
             "album",
+            "save_collection",
+            "delete_collection",
             "update_source",
             "relink_source",
             "remove_source",

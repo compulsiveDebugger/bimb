@@ -322,6 +322,12 @@ impl Library {
     pub fn annotate(&self, id: String, a: Annotation) -> Result<()> {
         self.catalog().annotate(id, a)
     }
+    pub fn save_collection(&self, id: String, name: String, query: Query) -> Result<String> {
+        self.catalog().save_collection(id, name, query)
+    }
+    pub fn delete_collection(&self, id: String) -> Result<()> {
+        self.catalog().delete_collection(id)
+    }
     pub fn album(
         &self,
         action: String,
@@ -458,6 +464,7 @@ impl Library {
             let mut staged_catalog = rusqlite::Connection::open(&staged)?;
             catalog::migrate(&mut staged_catalog)?;
             staged_catalog.prepare("SELECT id,source_id,code,path,message FROM issues")?;
+            staged_catalog.prepare("SELECT id,name,query FROM collections")?;
             drop(staged_catalog);
             self.backup(&self.0.home.join("before-restore.sqlite"))?;
             let path = staged.clone();
@@ -482,6 +489,7 @@ impl Library {
         let mut data = data;
         data["sources"] = serde_json::to_value(overview.sources)?;
         data["albums"] = serde_json::to_value(overview.albums)?;
+        data["collections"] = serde_json::to_value(overview.collections)?;
         data["settings"] = serde_json::to_value(overview.settings)?;
         let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         std::fs::write(&tmp, serde_json::to_vec_pretty(&data)?)?;

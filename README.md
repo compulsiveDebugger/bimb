@@ -36,11 +36,13 @@ Native media tests need access to macOS ImageIO/AVFoundation services. A restric
 - Multiple sources, incremental rescans, pause/cancel/resume, filesystem notifications and periodic reconciliation. Source scan reports show affected folders/files and error details separately from media errors.
 - Volume-aware reconnect/relink, original revision checks, conservative missing-file detection, and source exclusions.
 - JPEG/PNG/HEIC previews, H.264/HEVC test-video playback, independent metadata/thumbnail failure states.
-- Virtualized library and timeline; text search, filters, stable sorting, favorites, tags, captions, named places, manual albums, and on-this-day memories.
+- Virtualized library and timeline; text search, filters, stable sorting, favorites, tags, captions, named places, manual albums, saved dynamic collections, and on-this-day memories.
 - Offline metadata and thumbnails; 512-pixel thumbnail limit and configurable 1 GiB default budget.
 - Catalog backup/restore, automatic safety backups before catalog removal/restore, and JSON annotation export. These are **not backups of originals**. Catalog backups exclude thumbnails, which can be regenerated when sources are connected.
 
-Catalogs now migrate automatically to schema 2, preserving existing organization and scan issues. Backups from schemas 1 and 2 can be restored; upgraded catalogs require this build or newer.
+Use **Save as collection** to name the current search, filters and sort order. Open it from **Saved collections** to see current matches, including newly indexed or annotated media. Change filters and choose **Edit collection** to save an update; **Reset to saved** discards unsaved filter changes. Deleting a collection preserves its media and annotations. Collections are included in catalog backups and JSON organization exports.
+
+Catalogs now migrate automatically to schema 3, preserving existing organization and scan issues. Backups from schemas 1, 2 and 3 can be restored; upgraded catalogs require this build or newer.
 
 ## Structure and status
 

@@ -99,7 +99,7 @@ fn scan_issue_backups_restore_current_and_version_one_catalogs() {
     assert_eq!(page.issues[0].path.as_deref(), Some("旅行/locked"));
     assert_eq!(page.issues[0].message, "Permission denied");
     let db = rusqlite::Connection::open(&backup).unwrap();
-    db.execute_batch("DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); INSERT INTO issues(source_id,code) VALUES('source','folder_unreadable'); PRAGMA user_version=1;").unwrap();
+    db.execute_batch("DROP TABLE collections; DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); INSERT INTO issues(source_id,code) VALUES('source','folder_unreadable'); PRAGMA user_version=1;").unwrap();
     drop(db);
     lib.restore(&backup).unwrap();
     let page = lib.source_issues("source", None).unwrap();
@@ -113,6 +113,58 @@ fn scan_issue_backups_restore_current_and_version_one_catalogs() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn collections_survive_backup_restore_and_export_and_restore_version_two() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let id = lib
+        .save_collection(
+            String::new(),
+            "旅行".into(),
+            Query {
+                place: "Goa".into(),
+                date_from: "2024-01-01".into(),
+                sort: "name".into(),
+                ascending: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let backup = tmp.path().join("backup.sqlite");
+    lib.backup(&backup).unwrap();
+    lib.save_collection(id.clone(), "Changed".into(), Query::default())
+        .unwrap();
+    lib.restore(&backup).unwrap();
+    let saved = lib.overview().unwrap().collections.remove(0);
+    assert_eq!(saved.id, id);
+    assert_eq!(saved.name, "旅行");
+    assert_eq!(saved.query.place, "Goa");
+    assert_eq!(saved.query.date_from, "2024-01-01");
+    assert!(saved.query.ascending);
+    let export = tmp.path().join("annotations.json");
+    lib.export_annotations(&export).unwrap();
+    let data: serde_json::Value = serde_json::from_slice(&fs::read(export).unwrap()).unwrap();
+    assert_eq!(data["collections"][0]["name"], "旅行");
+    assert_eq!(data["collections"][0]["query"]["place"], "Goa");
+    assert!(data["collections"][0]["query"]["cursor"].is_null());
+    // A real schema-2 backup has no collection table. Upgrade only the staged copy.
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    db.execute_batch("DROP TABLE collections; PRAGMA user_version=2;")
+        .unwrap();
+    drop(db);
+    lib.restore(&backup).unwrap();
+    assert!(lib.overview().unwrap().collections.is_empty());
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    lib.restore(&tmp.path().join("catalog/before-restore.sqlite"))
+        .unwrap();
+    assert_eq!(lib.overview().unwrap().collections[0].id, id);
 }
 fn fixture() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mountain.jpg")

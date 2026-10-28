@@ -82,6 +82,21 @@ async fn album(
     work(move || lib.album(action, id, name, asset_ids)).await
 }
 #[tauri::command]
+async fn save_collection(
+    lib: State<'_, Library>,
+    id: String,
+    name: String,
+    query: Query,
+) -> Response<String> {
+    let lib = lib.inner().clone();
+    work(move || lib.save_collection(id, name, query)).await
+}
+#[tauri::command]
+async fn delete_collection(lib: State<'_, Library>, id: String) -> Response<()> {
+    let lib = lib.inner().clone();
+    work(move || lib.delete_collection(id)).await
+}
+#[tauri::command]
 async fn update_source(
     lib: State<'_, Library>,
     id: String,
@@ -347,6 +362,8 @@ fn main() {
             refresh_sources,
             annotate,
             album,
+            save_collection,
+            delete_collection,
             update_source,
             relink_source,
             remove_source,

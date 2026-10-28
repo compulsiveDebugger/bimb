@@ -48,6 +48,7 @@ CREATE INDEX IF NOT EXISTS asset_source ON assets(source_id);
 CREATE INDEX IF NOT EXISTS asset_identity ON assets(source_id,file_key);
 CREATE INDEX IF NOT EXISTS asset_capture ON assets(captured,id);
 CREATE TABLE IF NOT EXISTS albums(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS collections(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,query TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS memberships(album_id TEXT REFERENCES albums(id) ON DELETE CASCADE,
  asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE, position INTEGER NOT NULL, PRIMARY KEY(album_id,asset_id));
 CREATE TABLE IF NOT EXISTS issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,
@@ -67,7 +68,7 @@ CREATE VIEW IF NOT EXISTS library AS SELECT a.*,s.name AS source_name,
  FROM assets a JOIN sources s ON s.id=a.source_id;
 "#;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -100,6 +101,60 @@ pub fn settings(c: &Connection) -> Result<Settings> {
     value
         .map(|v| serde_json::from_str(&v).map_err(Into::into))
         .unwrap_or_else(|| Ok(Settings::default()))
+}
+fn collections(c: &Connection) -> Result<Vec<Collection>> {
+    let rows = c
+        .prepare("SELECT id,name,query FROM collections ORDER BY name COLLATE NOCASE,id")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(|(id, name, query)| {
+            Ok(Collection {
+                id,
+                name,
+                query: serde_json::from_str(&query)?,
+            })
+        })
+        .collect()
+}
+
+fn collection_query(mut q: Query) -> Result<Query> {
+    if q.text.len() > 1024
+        || q.source.len() > 128
+        || q.album.len() > 128
+        || q.folder.len() > 4096
+        || q.place.len() > 256
+        || !["", "photo", "video"].contains(&q.kind.as_str())
+        || ![
+            "",
+            "present",
+            "offline",
+            "missing",
+            "unavailable",
+            "ambiguous",
+        ]
+        .contains(&q.availability.as_str())
+        || !["capture", "added", "name", "size", "duration"].contains(&q.sort.as_str())
+    {
+        bail!("Invalid collection filters");
+    }
+    for date in [&q.date_from, &q.date_to] {
+        if !date.is_empty() {
+            if date.len() != 10 {
+                bail!("Use YYYY-MM-DD for collection dates");
+            }
+            chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .context("Use YYYY-MM-DD for collection dates")?;
+        }
+    }
+    if !q.date_from.is_empty() && !q.date_to.is_empty() && q.date_from > q.date_to {
+        bail!("Date range starts after it ends");
+    }
+    // A saved search always starts from the first page, independently of the
+    // caller's current cursor or page size.
+    q.cursor = None;
+    q.limit = Query::default().limit;
+    Ok(q)
 }
 pub fn source(c: &Connection, id: &str) -> Result<SourceRecord> {
     Ok(c.query_row(
@@ -229,7 +284,62 @@ impl Catalog {
             let (total,photos,videos,favorites,bytes,thumbnail_bytes) = c.query_row("SELECT count(*),coalesce(sum(kind='photo'),0),coalesce(sum(kind='video'),0),coalesce(sum(favorite),0),coalesce(sum(size),0),coalesce(sum(thumbnail_bytes),0) FROM assets",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get::<_,i64>(5)?)))?;
             let folders=c.prepare("SELECT DISTINCT folder FROM assets WHERE folder<>'' ORDER BY folder LIMIT 1000")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
             let places=c.prepare("SELECT DISTINCT place FROM assets WHERE place<>'' ORDER BY place LIMIT 1000")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
-            Ok(Overview{sources,albums,settings:settings(c)?,total,photos,videos,favorites,bytes,thumbnail_bytes:thumbnail_bytes as u64,folders,places})
+            Ok(Overview{sources,albums,collections:collections(c)?,settings:settings(c)?,total,photos,videos,favorites,bytes,thumbnail_bytes:thumbnail_bytes as u64,folders,places})
+        })
+    }
+    pub fn save_collection(&self, id: String, name: String, query: Query) -> Result<String> {
+        let name = name.trim().to_owned();
+        if name.is_empty() || name.chars().count() > 128 {
+            bail!("Name your collection using up to 128 characters");
+        }
+        let query = collection_query(query)?;
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            let duplicate: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM collections WHERE name=? AND id<>?)",
+                params![name, id],
+                |r| r.get(0),
+            )?;
+            if duplicate {
+                bail!("A collection with that name already exists");
+            }
+            let query = serde_json::to_string(&query)?;
+            let result = if id.is_empty() {
+                let count: i64 =
+                    tx.query_row("SELECT count(*) FROM collections", [], |r| r.get(0))?;
+                if count >= 100 {
+                    bail!("This preview supports up to 100 saved collections");
+                }
+                let id = uuid::Uuid::new_v4().to_string();
+                tx.execute(
+                    "INSERT INTO collections(id,name,query) VALUES(?,?,?)",
+                    params![id, name, query],
+                )?;
+                id
+            } else {
+                if tx.execute(
+                    "UPDATE collections SET name=?,query=? WHERE id=?",
+                    params![name, query, id],
+                )? != 1
+                {
+                    bail!("Collection no longer exists in this catalog");
+                }
+                id
+            };
+            bump(&tx)?;
+            tx.commit()?;
+            Ok(result)
+        })
+    }
+    pub fn delete_collection(&self, id: String) -> Result<()> {
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            if tx.execute("DELETE FROM collections WHERE id=?", [id])? != 1 {
+                bail!("Collection no longer exists in this catalog");
+            }
+            bump(&tx)?;
+            tx.commit()?;
+            Ok(())
         })
     }
     pub fn query(&self, mut q: Query) -> Result<Page> {
