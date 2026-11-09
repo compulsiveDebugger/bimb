@@ -114,7 +114,7 @@ Run these against the packaged installer on a supported machine or fresh VM with
 
 1. Finish the product/license decision and platform acceptance checks.
 2. Build/sign/notarize from the reviewed revision and collect final files with matching hashes.
-3. Prepare release notes stating supported OS/CPU, tested formats, known limitations and upgrade/catalog compatibility.
+3. Review the [draft 0.1.0 release notes](release-notes-0.1.0.md) against the actual packages, tested platforms and formats, and catalog compatibility.
 4. Create a draft release and attach only the final packages, manifests and documentation. Check them before publishing.
 5. Publish only with the user's authorization. Update the installation page with the real release link and validation evidence.
 

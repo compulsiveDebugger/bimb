@@ -11,6 +11,7 @@ Bimb is a local photo and video library. It indexes folders without moving origi
 | Fix a blocked launch, missing drive, unsupported file or scan problem | [Troubleshooting](troubleshooting.md) |
 | Build the application from source | [Development](development.md) |
 | Create installers, check signatures and prepare a release | [Packaging and release](releasing.md) |
+| Review the planned 0.1.0 release | [Draft release notes](release-notes-0.1.0.md) |
 | See what has actually been tested | [Validation evidence](validation.md) |
 | Understand the agreed scope and design | [Product](product.md) · [Architecture](architecture.md) |
 
