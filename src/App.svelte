@@ -146,7 +146,7 @@
 
 {#if selected}
   <div class="viewer" use:focusTrap inert={!!modal||!!confirmAction} role="dialog" aria-modal="true" aria-label="Media viewer" tabindex="-1">
-    <div class="viewer-top"><button class="icon-button light" onclick={()=>selected=null} aria-label="Close viewer"><X size={21}/></button><span>{selected.filename}</span><button class="icon-button light" title="Favorite" onclick={()=>favorite(selected!)}><Heart size={20} fill={selected.favorite?'currentColor':'none'}/></button><button class="icon-button light" title="Reveal in Finder" onclick={()=>guard(async()=>{await call('open_original',{id:selected!.id,reveal:true});})}><FolderOpen size={20}/></button></div>
+    <div class="viewer-top"><button class="icon-button light" onclick={()=>selected=null} aria-label="Close viewer"><X size={21}/></button><span>{selected.filename}</span><button class="icon-button light" title="Favorite" onclick={()=>favorite(selected!)}><Heart size={20} fill={selected.favorite?'currentColor':'none'}/></button><button class="icon-button light" title="Show original in folder" onclick={()=>guard(async()=>{await call('open_original',{id:selected!.id,reveal:true});})}><FolderOpen size={20}/></button></div>
     <div class="viewer-body"><div class="viewer-stage"><button class="viewer-arrow prev" aria-label="Previous item" onclick={()=>move(-1)}><ChevronLeft/></button>
       {#key selected.id}
         {#if selected.availability==='present'&&selected.kind==='video'&&!playbackFailed}<video controls preload="metadata" src={media('video',selected.id)} onerror={()=>playbackFailed=true}><track kind="captions"/></video>

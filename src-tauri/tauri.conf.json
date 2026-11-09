@@ -8,5 +8,18 @@
     "windows": [{ "title": "Bimb", "width": 1280, "height": 850, "minWidth": 880, "minHeight": 640, "backgroundColor": "#f7f7f2" }],
     "security": { "csp": "default-src 'self'; img-src 'self' bimb: http://bimb.localhost data:; media-src 'self' bimb: http://bimb.localhost; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'", "capabilities": ["main"] }
   },
-  "bundle": { "active": true, "targets": "all", "shortDescription": "Your moments, at home", "category": "Photography", "macOS": { "minimumSystemVersion": "26.0" }, "windows": { "webviewInstallMode": { "type": "offlineInstaller" } } }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "shortDescription": "Your moments, at home",
+    "category": "Photography",
+    "homepage": "https://github.com/compulsiveDebugger/bimb",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "macOS": { "minimumSystemVersion": "26.0", "signingIdentity": "-" },
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": { "type": "offlineInstaller" },
+      "nsis": { "installMode": "currentUser", "installerIcon": "icons/icon.ico", "uninstallerIcon": "icons/icon.ico" }
+    }
+  }
 }

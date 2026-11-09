@@ -2,11 +2,20 @@
 
 An offline personal photo and video library. Index folders where they already live, organize in a local catalog, and browse cached thumbnails when a drive is disconnected. Originals are never intentionally modified.
 
-**Status: 0.1.0 development preview.** The macOS 26 Apple Silicon build has native validation. A Windows x64 adapter and build path are implemented, with Windows runtime validation still pending. It is not a signed/notarized public release.
+**Status: 0.1.0 development preview.** The macOS 26 Apple Silicon build has native validation. A Windows x64 adapter and build path are implemented, with native core tests/lint passing in Windows CI. Windows installer and desktop UI acceptance remain pending. It is not a signed/notarized public release.
 
-## Run
+## Install and get started
 
-Open `target/release/bundle/macos/Bimb.app` after building, then choose **Add folder**. Start with a small exported phone-media folder. Bimb does not read an Apple Photos library directly.
+Packaged copies need **no developer tools**. On macOS, open the DMG and drag Bimb to Applications. On Windows, run the per-user `-setup.exe` installer and open Bimb from Start. This is a development preview: publisher signing/notarization and fresh-machine installer acceptance remain open.
+
+- [Installation, supported computers, download routes and upgrades](docs/installation.md)
+- [User guide: first import, search, albums, collections, offline drives and backups](docs/user-guide.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [All documentation](docs/README.md)
+
+Use the [Releases page](https://github.com/compulsiveDebugger/bimb/releases) only when a maintainer has published the matching installer. Successful native CI jobs on the updated packaging workflow produce temporary preview artifacts; a workflow change must run before those downloads exist. GitHub source-code ZIPs are not installers. See the installation guide for exact steps and preview trust limitations.
+
+After installing, choose **Add folder** and start with a small exported phone-media folder. Bimb does not read an Apple Photos library directly.
 
 The normal catalog lives in `~/Library/Application Support/app.bimb.desktop` on macOS and `%APPDATA%\app.bimb.desktop` on Windows. It contains SQLite data, cached thumbnails, and platform-specific helper data. There is no account, telemetry, remote UI, or cloud service. Catalog data and thumbnails rely on OS account/disk protection and are not independently encrypted.
 
@@ -29,17 +38,21 @@ Filesystem support is separate from codec support. macOS uses ImageIO/AVFoundati
 
 ## Development
 
+See the [full development guide](docs/development.md) and [packaging/release checklist](docs/releasing.md).
+
 Requires Rust 1.99 or later and Node 22.12 or later. macOS builds need macOS 26 and Xcode command-line tools including Swift. Windows x64 builds need Visual Studio C++ build tools, the Windows SDK and WebView2; the NSIS installer embeds the offline WebView2 installer. Dependency installation and installer preparation require internet; the built application does not require a development server.
 
 ```sh
 npm ci
 npm run desktop
 npm run desktop:build
+npm run installers:collect
 ```
 
-The desktop script runs on macOS and Windows, chooses an app bundle or NSIS installer respectively, and uses the optional project-local Rust installation in `.tools` when present. Set `BIMB_DATA_DIR` to an absolute directory to isolate a test catalog from your personal library. On Windows, run core checks with `cargo test --workspace --locked` and `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+The desktop script runs on macOS and Windows, chooses an app bundle plus DMG or an NSIS installer respectively, and uses the optional project-local Rust installation in `.tools` when present. Set `BIMB_DATA_DIR` to an absolute directory to isolate a test catalog from your personal library. On Windows, run core checks with `cargo test --workspace --locked` and `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 
 ```sh
+npm run docs:check
 npm run check
 sh scripts/cargo.sh test --workspace --offline
 sh scripts/cargo.sh clippy --workspace --all-targets --offline -- -D warnings
