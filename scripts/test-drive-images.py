@@ -30,8 +30,9 @@ with tempfile.TemporaryDirectory(prefix="bimb-drive-tests-") as temporary:
         image = temporary / f"{name}.dmg"
         mount = temporary / f"mount-{name}"
         mount.mkdir()
+        # FAT32 and exFAT volume labels are limited to 11 characters.
         run("hdiutil", "create", "-size", "96m", "-fs", filesystem,
-            "-volname", f"BimbTest-{name}", str(image))
+            "-volname", f"BIMB-{name.upper()}", str(image))
         for read_only in [False, True]:
             attach(image, mount, read_only)
             try:
@@ -43,3 +44,6 @@ with tempfile.TemporaryDirectory(prefix="bimb-drive-tests-") as temporary:
                     "mounted_drive_fixture_is_read_without_writing_originals", "--", "--ignored", "--nocapture", env=env)
             finally:
                 run("hdiutil", "detach", str(mount))
+
+run("sh", str(REPO / "scripts/cargo.sh"), "test", "-p", "bimb-core", "--test", "drives",
+    "forced_image_detach_interrupts_and_reconnects_scan", "--", "--ignored", "--nocapture")

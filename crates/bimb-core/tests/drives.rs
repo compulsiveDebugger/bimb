@@ -158,3 +158,139 @@ fn mounted_drive_fixture_is_read_without_writing_originals() {
     assert_eq!(lib.query(Query::default()).unwrap().total, 1);
     assert_eq!(fs::read(root.join("mountain.jpg")).unwrap(), before);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires macOS DiskImages access for disposable FAT32 and exFAT images"]
+fn forced_image_detach_interrupts_and_reconnects_scan() {
+    use std::{path::PathBuf, process::Command};
+
+    struct Mount(Option<PathBuf>);
+    impl Mount {
+        fn attach(image: &Path, read_only: bool) -> Self {
+            let mut command = Command::new("hdiutil");
+            command.arg("attach").arg(image).args([
+                "-nobrowse",
+                "-noautoopen",
+                "-mountrandom",
+                "/Volumes",
+            ]);
+            if read_only {
+                command.arg("-readonly");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let mount = stdout
+                .lines()
+                .filter_map(|line| line.split('\t').next_back())
+                .map(str::trim)
+                .find(|path| path.starts_with("/Volumes/"))
+                .unwrap_or_else(|| panic!("No mount point in hdiutil output: {stdout}"));
+            Self(Some(mount.into()))
+        }
+
+        fn detach(&mut self) -> bool {
+            let Some(path) = &self.0 else { return true };
+            let detached = Command::new("hdiutil")
+                .arg("detach")
+                .arg(path)
+                .arg("-force")
+                .status()
+                .is_ok_and(|status| status.success());
+            if detached {
+                self.0 = None;
+            }
+            detached
+        }
+    }
+    impl Drop for Mount {
+        fn drop(&mut self) {
+            self.detach();
+        }
+    }
+
+    fn until(description: &str, mut condition: impl FnMut() -> bool) {
+        let start = Instant::now();
+        while !condition() {
+            assert!(start.elapsed() < Duration::from_secs(60), "{description}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    for filesystem in ["MS-DOS FAT32", "ExFAT"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = tmp.path().join("bimb-reconnect.dmg");
+        let status = Command::new("hdiutil")
+            .args([
+                "create",
+                "-size",
+                "96m",
+                "-fs",
+                filesystem,
+                "-volname",
+                "BIMB-TEST",
+            ])
+            .arg(&image)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut writable = Mount::attach(&image, false);
+        let root = writable.0.as_ref().unwrap().join("media");
+        fs::create_dir(&root).unwrap();
+        let bytes = include_bytes!("fixtures/mountain.jpg");
+        fs::write(root.join("mountain.jpg"), bytes).unwrap();
+        let lib = library(&tmp.path().join("catalog"));
+        let source = lib.add_source(root.clone()).unwrap();
+        wait(&lib, &source);
+        let asset = lib.query(Query::default()).unwrap().assets.remove(0);
+        let thumbnail = lib.thumbnail(&asset.id).unwrap();
+        lib.annotate(
+            asset.id.clone(),
+            Annotation {
+                favorite: true,
+                caption: "Keep me".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let batch = root.join("batch");
+        fs::create_dir(&batch).unwrap();
+        for number in 0..120 {
+            fs::write(batch.join(format!("new-{number:03}.jpg")), bytes).unwrap();
+        }
+        lib.start_scan(&source).unwrap();
+        until("rescan did not discover new files", || {
+            lib.require_idle(&source).is_err() && lib.overview().unwrap().total > 1
+        });
+        assert!(
+            writable.detach(),
+            "Could not detach the {filesystem} test image"
+        );
+        until("scan remained active after detach", || {
+            lib.require_idle(&source).is_ok()
+        });
+        lib.refresh_sources().unwrap();
+        assert_eq!(lib.overview().unwrap().sources[0].scan_state, "interrupted");
+        assert_eq!(lib.asset(&asset.id).unwrap().availability, "offline");
+        assert_eq!(lib.thumbnail(&asset.id).unwrap(), thumbnail);
+        assert!(lib.original(&asset.id).is_err());
+
+        let read_only = Mount::attach(&image, true);
+        let new_root = read_only.0.as_ref().unwrap().join("media");
+        assert_ne!(new_root, root);
+        lib.refresh_sources().unwrap();
+        wait(&lib, &source);
+        let overview = lib.overview().unwrap();
+        assert_eq!(overview.sources[0].state, "online");
+        assert_eq!(overview.sources[0].read_only, Some(true));
+        assert_eq!(lib.catalog().source(&source).unwrap().root, new_root);
+        assert_eq!(overview.total, 121);
+        let restored = lib.asset(&asset.id).unwrap();
+        assert!(restored.favorite);
+        assert_eq!(restored.caption, "Keep me");
+        assert_eq!(lib.thumbnail(&asset.id).unwrap(), thumbnail);
+        assert_eq!(fs::read(lib.original(&asset.id).unwrap()).unwrap(), bytes);
+    }
+}

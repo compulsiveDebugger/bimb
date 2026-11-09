@@ -12,6 +12,7 @@ use rusqlite::params;
 use std::{
     collections::HashMap,
     fs::File,
+    panic::catch_unwind,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -302,7 +303,13 @@ impl Library {
         })?;
         let library = self.clone();
         std::thread::Builder::new().name("bimb-scan".into()).spawn(move|| {
-            let result=scan::run(&library,&key,&flag);
+            let result = {
+                // A detached volume can make directory iteration panic while closing a handle.
+                // Catch that unwind before it poisons the gate or leaves the source stuck scanning.
+                let _gate = library.0.scan_gate.lock().unwrap();
+                catch_unwind(|| scan::run(&library, &key, &flag))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("Directory traversal stopped unexpectedly")))
+            };
             if let Err(error)=result && flag.load(Ordering::SeqCst)==0 {
                 let id=key.clone();
                 let message=format!("{error:#}");

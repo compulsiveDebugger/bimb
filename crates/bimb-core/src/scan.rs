@@ -42,7 +42,6 @@ pub fn normalized_date(raw: Option<&str>) -> Option<String> {
 }
 
 pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
-    let _gate = lib.0.scan_gate.lock().unwrap();
     if !active(flag) {
         return Ok(());
     }
@@ -65,7 +64,9 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
     let walker = walkdir::WalkDir::new(&source.root)
         .follow_links(false)
         .same_file_system(true)
-        .max_open(16)
+        // On macOS, dropping two disconnected directory streams can panic twice
+        // during unwinding and abort the process. Buffer parent entries instead.
+        .max_open(if cfg!(target_os = "macos") { 1 } else { 16 })
         .into_iter()
         .filter_entry(move |entry| {
             if entry.depth() == 0 {

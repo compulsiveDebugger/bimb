@@ -70,7 +70,7 @@ For macOS mounted-image testing:
 python3 scripts/test-drive-images.py
 ```
 
-This creates only temporary FAT32/exFAT disk images and tests writable/read-only scans. It must never select a physical disk. Some environments reject image creation; record that as unavailable validation rather than passing the test. FAT32 has passed in the native CI run recorded in [validation](validation.md); exFAT image creation failed there.
+This creates temporary FAT32 and exFAT disk images and scans each in writable and read-only mode. It also detaches a test image during a rescan and verifies that Bimb reconnects at a different mount path. Both filesystems limit volume labels to 11 characters. See the [validation record](validation.md) for local results and remaining physical-drive checks.
 
 ## Build installable packages
 

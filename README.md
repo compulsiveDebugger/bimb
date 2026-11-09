@@ -30,7 +30,7 @@ Choose a folder on an internal drive, external USB disk/SSD, or memory card. Sou
 | FAT12 / FAT16 / FAT32 / exFAT | Readable mounted volumes | Readable mounted volumes |
 | Other formats | Requires an OS driver, permissions and stable volume/folder identity | Requires an OS driver, permissions and stable volume/folder identity |
 
-This is an implementation compatibility matrix, not certification of every filesystem, device or driver. FAT/exFAT image and physical NTFS-drive validation remain open locally. Source cards show the reported format, drive type and read-only status. Windows reports fixed/removable device classes; an external USB SSD can be classified as fixed.
+Local macOS tests cover writable and read-only FAT32 and exFAT images. Physical NTFS, FAT32 and exFAT drive testing is still open. Source cards show the reported format, drive type and read-only status. Windows reports fixed/removable device classes. An external USB SSD can be classified as fixed.
 
 Reconnect uses the original volume and folder identity, including macOS mount-name changes and Windows drive-letter/mounted-folder changes. Multiple matches require explicit relinking. File IDs on FAT-family filesystems can change during renames or directory reorganization: Bimb preserves the older catalog entry and annotations rather than guessing which file inherited them. Copies and replacement drives are separate sources. Use separate catalogs on macOS and Windows; cross-OS catalog path remapping is not implemented, and incompatible restores are rejected before replacing the active catalog.
 

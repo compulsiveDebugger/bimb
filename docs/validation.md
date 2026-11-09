@@ -2,13 +2,20 @@
 
 10–11 October 2026, with scan-report, saved-collection and drive-adapter validation on 28 October 2026. Local development preview; this is not a general availability or cross-platform certification.
 
+## Installer and drive images — 10 November
+
+- On the development Mac, the Apple Silicon DMG from `f67d43b` passed signature, image and SHA-256 verification. The installed copy started with an isolated catalog and generated JPEG thumbnails for the synthetic JPEG, PNG, HEIC, H.264 and HEVC fixtures.
+- Replacing a test install built from `c3159a0` with the DMG copy migrated its catalog from schema 3 to schema 4. The native UI showed the retained source, favorite and caption. The original file matched byte for byte and the pre-upgrade backup passed SQLite integrity checking.
+- The earlier exFAT image creation failure was reproduced with the 14-character `BimbTest-exfat` label. With labels within the 11-character limit, all four local FAT32 and exFAT checks passed in writable and read-only mode.
+- For each filesystem, forcing a disposable image to detach during a nested-directory rescan reproduced a macOS directory-close panic. Bimb now marks the scan interrupted and keeps the cached thumbnail available. Remounting the image read-only at a different path resumed indexing and preserved the original photo, favorite and caption. Physical drives, fresh-machine installer acceptance and the new installer CI workflow remain open.
+
 ## Drive compatibility increment — 28 October
 
 - Schema 4 preserves schemas 1–3 and adds filesystem/drive/read-only details, volume-relative roots and native path provenance. Foreign-OS catalogs are rejected before their paths are interpreted; restore validates a staged copy before replacing the active catalog.
 - The macOS native suite passes 23 tests (plus one intentionally ignored mounted-image test). New checks cover source format/read-only observations, relative-root persistence, metadata and preview generation, rename identity/annotations, offline cached thumbnails, reconnect/rescan, lossless native path encodings, unique reconnect selection and ambiguous identities, schema-3 collections and foreign-path rejection. Existing native media/watcher tests also pass with OS-service access.
 - `npm run check`, `npm run build` and the 9.80 MiB macOS app bundle build pass. macOS and Windows-target core clippy passes with warnings denied. The Windows check includes all core test/example targets; it uses linked SQLite declarations to avoid requiring a Windows C compiler on the Mac. This is a Rust type/lint check, **not** a Windows executable build or runtime test.
 - The Windows host dispatches a bounded native media subprocess before creating the UI. WinRT/WIC provides image decoding, EXIF orientation, sRGB JPEG derivatives, image metadata/GPS, video metadata and OS video thumbnails. HEIC/HEVC require suitable installed codecs; in-webview playback remains a separate capability. Windows shell open/reveal and OS-specific development/build scripts are implemented.
-- A compatibility workflow builds and tests on macOS 26 and Windows, and runs synthetic FAT32/exFAT images on macOS. `scripts/test-drive-images.py` creates new temporary images and exercises writable/read-only scans without touching physical disks. The local image attempt was denied by macOS DiskImages services (`Operation not permitted`), including outside the restricted runner. It is **not** counted as passed filesystem validation.
+- A compatibility workflow builds and tests on macOS 26 and Windows, and runs synthetic FAT32/exFAT images on macOS. The earlier image run failed with `Operation not permitted`. The November checks above identify and address the exFAT creation failure.
 - Windows runtime/UI, physical NTFS/FAT/exFAT drives, changed Windows drive letters, physical hot unplug and full driver/codec combinations remain validation gates. A Windows USB SSD may report as a fixed device. FAT file IDs and coarse timestamps limit rename/replacement confidence; Bimb never guesses a rename when identity evidence changes.
 
 ## Environment and commands
