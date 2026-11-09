@@ -61,6 +61,19 @@ On 11 October, the final native release displayed the HEIC cached thumbnail, cap
 
 `cargo run -p bimb-core --example catalog_benchmark --offline` inserted 3,000 synthetic catalog rows and ran 100 text search/sort queries. Observed debug-build latency: **p50 18.8 ms; p95 21.5 ms**. These results include the local catalog queries and exclude media I/O and UI rendering. They are not a 1 TB import benchmark or a guarantee for an arbitrary drive.
 
+## Local media benchmark — 10 November
+
+The packaged macOS app from `7829655` indexed 3,000 synthetic files from the internal drive in an isolated catalog. The source contained 600 copies each of the repository's JPEG, PNG, HEIC, H.264 and HEVC fixtures across 30 folders. The files totaled 26.3 MiB.
+
+| Check | Observed result |
+|---|---|
+| Initial scan | 230.8 seconds, 3,000 thumbnails, zero media errors |
+| Manual rescan of unchanged files | 1.13 seconds, all 3,000 thumbnails retained |
+| Native filename search | A single match appeared in 0.43 seconds during indexing and in 0.76 seconds after indexing for two different search terms. Times include the input debounce and accessibility polling. |
+| Sampled resident memory | 160.1 MiB for the app and its child processes during initial indexing, sampled about every 100 ms. WebKit processes outside the app's process tree were excluded. |
+
+A generated H.264 clip with AAC audio, a 90-degree rotation, and three distinct frame intervals produced a 240 × 320 thumbnail matching the rotation metadata. A generated HEVC clip with HLG transfer metadata produced a 320 × 240 thumbnail. Both videos played to the end in the native viewer. The check verified the AAC track and playback controls. The actual 1 TB library, real phone exports, audio output, and HDR display fidelity remain open.
+
 ## Current implementation choices
 
 - One background decode worker at a time, plus a separate serialized preview worker. Both are subprocesses with output limits and a 25-second deadline; images are downsampled using native codecs. This bounds concurrency, not a hard OS-enforced RAM ceiling.
