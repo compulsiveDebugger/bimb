@@ -20,6 +20,8 @@ use std::{
     },
 };
 
+const CATALOG_STAGE_PREFIX: &str = ".bimb-catalog-";
+
 #[derive(Clone)]
 pub struct Library(pub(crate) Arc<Inner>);
 pub(crate) struct Inner {
@@ -56,8 +58,19 @@ impl Library {
         platform::private_dir(&home.join("temporary"))?;
         // No workers exist yet. Temporary output from an interrupted run is disposable.
         for e in std::fs::read_dir(home.join("temporary"))?.flatten() {
-            if e.file_type().is_ok_and(|t| t.is_file()) {
-                let _ = std::fs::remove_file(e.path());
+            match e.file_type() {
+                Ok(t) if t.is_file() => {
+                    let _ = std::fs::remove_file(e.path());
+                }
+                Ok(t)
+                    if t.is_dir()
+                        && e.file_name()
+                            .to_string_lossy()
+                            .starts_with(CATALOG_STAGE_PREFIX) =>
+                {
+                    let _ = std::fs::remove_dir_all(e.path());
+                }
+                _ => (),
             }
         }
         let worker = match worker {
@@ -85,7 +98,17 @@ impl Library {
         watch::start(self);
     }
     pub fn overview(&self) -> Result<Overview> {
-        self.0.catalog.overview()
+        let scans = self.0.scans.lock().unwrap();
+        let mut overview = self.0.catalog.overview()?;
+        for source in &mut overview.sources {
+            // A full catalog volume can prevent the worker from persisting its exit status.
+            if matches!(source.scan_state.as_str(), "queued" | "scanning")
+                && !scans.contains_key(&source.id)
+            {
+                source.scan_state = "interrupted".into();
+            }
+        }
+        Ok(overview)
     }
     pub fn query(&self, q: Query) -> Result<Page> {
         self.0.catalog.query(q)
@@ -294,35 +317,53 @@ impl Library {
         }
         self.catalog().source(id)?;
         let key = id.to_owned();
-        let flag = Arc::new(AtomicU8::new(0));
-        scans.insert(key.clone(), flag.clone());
-        let id = key.clone();
+        let queued = key.clone();
         self.catalog().call(move |c| {
-            c.execute("UPDATE sources SET scan_state='queued' WHERE id=?", [id])?;
+            c.execute(
+                "UPDATE sources SET scan_state='queued' WHERE id=?",
+                [queued],
+            )?;
             Ok(())
         })?;
+        let flag = Arc::new(AtomicU8::new(0));
+        scans.insert(key.clone(), flag.clone());
         let library = self.clone();
-        std::thread::Builder::new().name("bimb-scan".into()).spawn(move|| {
-            let result = {
-                // A detached volume can make directory iteration panic while closing a handle.
-                // Catch that unwind before it poisons the gate or leaves the source stuck scanning.
-                let _gate = library.0.scan_gate.lock().unwrap();
-                catch_unwind(|| scan::run(&library, &key, &flag))
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("Directory traversal stopped unexpectedly")))
-            };
-            if let Err(error)=result && flag.load(Ordering::SeqCst)==0 {
-                let id=key.clone();
-                let message=format!("{error:#}");
-                let _=library.catalog().call(move|c|{
-                    let tx=c.transaction()?;
-                    tx.execute("UPDATE sources SET scan_state='interrupted' WHERE id=?",[&id])?;
-                    tx.execute("INSERT INTO issues(source_id,code,message) SELECT id,'scan_interrupted',? FROM sources WHERE id=?",params![message,id])?;
-                    tx.commit()?;Ok(())
-                });
-            }
-            library.0.scans.lock().unwrap().remove(&key);
-        })?;
+        let worker = std::thread::Builder::new()
+            .name("bimb-scan".into())
+            .spawn(move || {
+                let result = {
+                    // A detached volume can make directory iteration panic while closing a handle.
+                    // Catch that unwind before it poisons the gate or leaves the source stuck scanning.
+                    let _gate = library.0.scan_gate.lock().unwrap();
+                    catch_unwind(|| scan::run(&library, &key, &flag)).unwrap_or_else(|_| {
+                        Err(anyhow::anyhow!("Directory traversal stopped unexpectedly"))
+                    })
+                };
+                if let Err(error) = result
+                    && flag.load(Ordering::SeqCst) == 0
+                {
+                    library.record_scan_interruption(key.clone(), format!("{error:#}"));
+                }
+                library.0.scans.lock().unwrap().remove(&key);
+            });
+        if let Err(error) = worker {
+            scans.remove(id);
+            self.record_scan_interruption(id.to_owned(), error.to_string());
+            return Err(error.into());
+        }
         Ok(())
+    }
+    fn record_scan_interruption(&self, id: String, message: String) {
+        let _ = self.catalog().call(move |c| {
+            let tx = c.transaction()?;
+            tx.execute("UPDATE sources SET scan_state='interrupted' WHERE id=?", [&id])?;
+            tx.execute(
+                "INSERT INTO issues(source_id,code,message) SELECT id,'scan_interrupted',? FROM sources WHERE id=?",
+                params![message, id],
+            )?;
+            tx.commit()?;
+            Ok(())
+        });
     }
     pub fn control_scan(&self, id: &str, action: &str) -> Result<()> {
         match action {
@@ -448,25 +489,9 @@ impl Library {
     }
     pub fn backup(&self, destination: &Path) -> Result<()> {
         self.validate_export_path(destination)?;
-        let tmp = destination.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-        let output = tmp.clone();
-        self.catalog().call(move |c| {
-            c.backup("main", &output, None)?;
-            Ok(())
-        })?;
-        let check = rusqlite::Connection::open_with_flags(
-            &tmp,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let integrity: String = check.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
-        drop(check);
-        if integrity != "ok" {
-            let _ = std::fs::remove_file(tmp);
-            bail!("Backup validation failed");
-        }
-        File::open(&tmp)?.sync_all()?;
-        std::fs::rename(tmp, destination)?;
-        Ok(())
+        let destination = destination.to_owned();
+        self.catalog()
+            .call(move |c| write_catalog_backup(c, &destination))
     }
     fn validate_export_path(&self, path: &Path) -> Result<()> {
         let parent = path
@@ -506,31 +531,42 @@ impl Library {
         }
         // Probe required schema before replacing anything.
         check.prepare("SELECT a.id,a.path,s.volume,s.root_key FROM assets a JOIN sources s ON s.id=a.source_id")?;
-        drop(check);
         // Stage the input so restoring our own safety backup cannot overwrite it
         // when the current catalog is saved below.
-        let staged = self
-            .0
-            .home
-            .join("temporary")
-            .join(format!("restore-{}.sqlite", uuid::Uuid::new_v4()));
-        std::fs::copy(path, &staged)?;
-        let result = (|| {
-            // Upgrade and validate the staged backup before replacing the active catalog.
-            let mut staged_catalog = rusqlite::Connection::open(&staged)?;
-            catalog::migrate(&mut staged_catalog)?;
-            staged_catalog.prepare("SELECT id,source_id,code,path,message FROM issues")?;
-            staged_catalog.prepare("SELECT id,name,query FROM collections")?;
-            drop(staged_catalog);
-            self.backup(&self.0.home.join("before-restore.sqlite"))?;
-            let path = staged.clone();
-            self.catalog().call(move|c|{
-            c.restore("main",&path,None::<fn(rusqlite::backup::Progress)>)?;
-            c.execute_batch("PRAGMA foreign_keys=ON; UPDATE sources SET state='unavailable',scan_state='idle'; UPDATE assets SET thumbnail_state='queued',thumbnail_bytes=0;")?;bump(c)?;Ok(())
+        let safety = self.0.home.join("before-restore.sqlite");
+        self.validate_export_path(&safety)?;
+        with_catalog_stage(&self.0.home.join("temporary"), |staged| {
+            check.backup("main", staged, None)?;
+            drop(check);
+            let staged = staged.to_owned();
+            self.catalog().call(move |c| {
+                let mut replacement = rusqlite::Connection::open(&staged)?;
+                catalog::migrate(&mut replacement)?;
+                replacement.prepare("SELECT id,source_id,code,path,message FROM issues")?;
+                replacement.prepare("SELECT id,name,query FROM collections")?;
+                let generation: i64 = c.query_row(
+                    "SELECT CAST(value AS INTEGER) FROM meta WHERE key='generation'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let tx = replacement.transaction()?;
+                tx.execute_batch(
+                    "UPDATE sources SET state='unavailable',scan_state='idle';
+                     UPDATE assets SET thumbnail_state='queued',thumbnail_bytes=0;",
+                )?;
+                tx.execute(
+                    "UPDATE meta SET value=MAX(CAST(value AS INTEGER),?) WHERE key='generation'",
+                    [generation],
+                )?;
+                bump(&tx)?;
+                tx.commit()?;
+                drop(replacement);
+
+                write_catalog_backup(c, &safety)?;
+                c.restore("main", &staged, None::<fn(rusqlite::backup::Progress)>)?;
+                Ok(())
             })
-        })();
-        let _ = std::fs::remove_file(staged);
-        result?;
+        })?;
         self.repair_thumbnails()?;
         Ok(())
     }
@@ -641,6 +677,35 @@ impl Library {
 }
 
 // De-duplicate equivalent mount spellings before deciding whether a reconnect is ambiguous.
+fn write_catalog_backup(connection: &rusqlite::Connection, destination: &Path) -> Result<()> {
+    let parent = destination.parent().context("Choose an export location")?;
+    with_catalog_stage(parent, |output| {
+        connection.backup("main", output, None)?;
+        let check = rusqlite::Connection::open(output)?;
+        let journal: String = check.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))?;
+        let integrity: String = check.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        if journal != "delete" || integrity != "ok" {
+            bail!("Backup validation failed");
+        }
+        drop(check);
+        File::options().write(true).open(output)?.sync_all()?;
+        std::fs::rename(output, destination)?;
+        Ok(())
+    })
+}
+
+fn with_catalog_stage<T>(parent: &Path, run: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    // Keep the database and any SQLite sidecars in one disposable staging directory.
+    let staging = parent.join(format!(
+        "{CATALOG_STAGE_PREFIX}{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir(&staging)?;
+    let result = run(&staging.join("catalog.sqlite"));
+    let _ = std::fs::remove_dir_all(staging);
+    result
+}
+
 fn verified_reconnect_candidates(
     candidates: impl IntoIterator<Item = PathBuf>,
     verify: impl Fn(&Path) -> bool,

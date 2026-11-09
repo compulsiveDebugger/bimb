@@ -74,6 +74,12 @@ The packaged macOS app from `7829655` indexed 3,000 synthetic files from the int
 
 A generated H.264 clip with AAC audio, a 90-degree rotation, and three distinct frame intervals produced a 240 × 320 thumbnail matching the rotation metadata. A generated HEVC clip with HLG transfer metadata produced a 320 × 240 thumbnail. Both videos played to the end in the native viewer. The check verified the AAC track and playback controls. The actual 1 TB library, real phone exports, audio output, and HDR display fidelity remain open.
 
+## Catalog fault recovery — 10 November
+
+- A native test harness filled a disposable 48 MiB HFS+ image that held the catalog and a backup. The harness reproduced both SQLite `SQLITE_FULL` and filesystem `ENOSPC`. Failed annotation, backup replacement and restore attempts preserved the existing favorite, caption and backup bytes. Bimb reported an active scan as interrupted after its worker exited. After space was freed, the same process retried the scan and restored the backup successfully.
+- A child process was force-stopped after it committed a new media discovery while a catalog update was still uncommitted. Reopening the catalog rolled back the uncommitted update, retained the favorite and caption, and resumed indexing. The catalog passed SQLite integrity checks and the original photo still matched byte for byte.
+- Regression tests verify that a failed queue write can be retried, a backup is readable as a single SQLite file, and failed backup staging leaves no extra files. A backup with a trigger that aborts thumbnail preparation is rejected before it can replace the active catalog. Existing tests cover older catalog schemas and foreign-OS rejection.
+
 ## Current implementation choices
 
 - One background decode worker at a time, plus a separate serialized preview worker. Both are subprocesses with output limits and a 25-second deadline; images are downsampled using native codecs. This bounds concurrency, not a hard OS-enforced RAM ceiling.
@@ -91,6 +97,6 @@ A generated H.264 clip with AAC audio, a 90-degree rotation, and three distinct 
 
 - Validate a representative subset of the user's phone exports, including audio, HDR, rotation, variable frame rate, long videos, and any motion-photo variants.
 - Measure initial scan, warm rescan, UI latency and combined memory on the actual 3,000-file / 1 TB library.
-- Physical external-drive hot unplug/reconnect and filesystem-specific identity tests (including exFAT); source permission changes, app termination at commit boundaries, disk-full injection, and invalid/migration recovery scenarios.
+- Physical external-drive hot unplug/reconnect and filesystem-specific identity tests, including exFAT. Repeat the disk-full and forced-termination checks on Windows.
 - Viewport-priority decoding and a full implementation review against the approved architecture before declaring the complete first release.
 - Public distribution requires signing/notarization and a license decision. The Windows adapter needs native runtime/packaging/UI validation; Intel/macOS needs its own native build and validation phase.

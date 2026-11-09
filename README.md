@@ -84,4 +84,4 @@ Catalogs now migrate automatically to schema 4, preserving organization and scan
 - `src`: Svelte/TypeScript interface.
 - [Product decisions](docs/product.md), [architecture](docs/architecture.md), [reference-product research](docs/research.md), and [validation and remaining release gates](docs/validation.md).
 
-Real phone HDR/audio/variable-frame-rate variants, the full 1 TB workload, physical external-drive hot unplug, disk-full/crash fault injection, and other operating systems still need validation. Face recognition, semantic search, maps, Live Photo grouping, and original-file editing are outside this phase.
+Real phone HDR/audio/variable-frame-rate variants, the full 1 TB workload, physical external-drive hot unplug, and Windows disk-full/crash recovery still need validation. Face recognition, semantic search, maps, Live Photo grouping, and original-file editing are outside this phase.
