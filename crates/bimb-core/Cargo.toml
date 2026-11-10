@@ -16,5 +16,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
 notify = "8"
 
+[target.'cfg(windows)'.dependencies]
+windows-collections = "0.3"
+windows = { version = "0.62", features = [
+    "Foundation", "Graphics_Imaging", "Storage", "Storage_FileProperties", "Storage_Streams",
+    "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_WinRT",
+    "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 tempfile = "3"

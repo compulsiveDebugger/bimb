@@ -19,6 +19,15 @@ async fn overview(lib: State<'_, Library>) -> Response<Overview> {
     work(move || lib.overview()).await
 }
 #[tauri::command]
+async fn source_issues(
+    lib: State<'_, Library>,
+    id: String,
+    cursor: Option<String>,
+) -> Response<SourceIssuePage> {
+    let lib = lib.inner().clone();
+    work(move || lib.source_issues(&id, cursor)).await
+}
+#[tauri::command]
 async fn query(lib: State<'_, Library>, query: Query) -> Response<Page> {
     let lib = lib.inner().clone();
     work(move || lib.query(query)).await
@@ -71,6 +80,21 @@ async fn album(
 ) -> Response<String> {
     let lib = lib.inner().clone();
     work(move || lib.album(action, id, name, asset_ids)).await
+}
+#[tauri::command]
+async fn save_collection(
+    lib: State<'_, Library>,
+    id: String,
+    name: String,
+    query: Query,
+) -> Response<String> {
+    let lib = lib.inner().clone();
+    work(move || lib.save_collection(id, name, query)).await
+}
+#[tauri::command]
+async fn delete_collection(lib: State<'_, Library>, id: String) -> Response<()> {
+    let lib = lib.inner().clone();
+    work(move || lib.delete_collection(id)).await
 }
 #[tauri::command]
 async fn update_source(
@@ -185,23 +209,7 @@ async fn open_original(lib: State<'_, Library>, id: String, reveal: bool) -> Res
     let lib = lib.inner().clone();
     work(move || {
         let path = lib.original(&id)?;
-        #[cfg(target_os = "macos")]
-        {
-            let mut command = std::process::Command::new("/usr/bin/open");
-            if reveal {
-                command.arg("-R");
-            }
-            command.arg(&path);
-            if !command.status()?.success() {
-                anyhow::bail!("Could not open the original");
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (path, reveal);
-            anyhow::bail!("Opening originals is not implemented on this platform yet");
-        }
-        Ok(())
+        bimb_core::platform::open_original(&path, reveal)
     })
     .await
 }
@@ -311,6 +319,9 @@ fn parse_range(header: Option<&str>, length: u64) -> anyhow::Result<(u64, u64)> 
     ))
 }
 fn main() {
+    if bimb_core::platform::media_worker_main() {
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -330,6 +341,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             overview,
+            source_issues,
             query,
             get_asset,
             add_source,
@@ -337,6 +349,8 @@ fn main() {
             refresh_sources,
             annotate,
             album,
+            save_collection,
+            delete_collection,
             update_source,
             relink_source,
             remove_source,

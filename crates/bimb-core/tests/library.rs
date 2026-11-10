@@ -9,6 +9,9 @@ use std::{
 };
 
 fn wait(lib: &Library, id: &str) {
+    wait_for_state(lib, id, "complete");
+}
+fn wait_for_state(lib: &Library, id: &str, expected: &str) {
     let start = Instant::now();
     loop {
         let overview = lib.overview().unwrap();
@@ -16,7 +19,7 @@ fn wait(lib: &Library, id: &str) {
         if !["queued", "scanning"].contains(&source.scan_state.as_str())
             && lib.require_idle(id).is_ok()
         {
-            assert_eq!(source.scan_state, "complete");
+            assert_eq!(source.scan_state, expected);
             return;
         }
         assert!(
@@ -26,6 +29,236 @@ fn wait(lib: &Library, id: &str) {
         );
         std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+#[test]
+fn failed_scan_queue_can_be_retried() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("photos");
+    fs::create_dir(&root).unwrap();
+    fs::copy(fixture(), root.join("first.jpg")).unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let source = lib.add_source(root.clone()).unwrap();
+    wait(&lib, &source);
+    fs::copy(fixture(), root.join("new.jpg")).unwrap();
+
+    // Simulate a worker that exited before it could write its interrupted status.
+    lib.catalog()
+        .call(|c| {
+            c.execute("UPDATE sources SET scan_state='scanning'", [])?;
+            c.pragma_update(None, "query_only", true)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(lib.overview().unwrap().sources[0].scan_state, "interrupted");
+    assert!(lib.start_scan(&source).is_err());
+    lib.catalog()
+        .call(|c| Ok(c.pragma_update(None, "query_only", false)?))
+        .unwrap();
+
+    assert!(lib.require_idle(&source).is_ok());
+    lib.start_scan(&source).unwrap();
+    wait(&lib, &source);
+    assert_eq!(lib.overview().unwrap().total, 2);
+}
+
+#[test]
+fn backups_are_standalone_and_cleanup_failed_exports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let exports = tmp.path().join("exports");
+    fs::create_dir(&exports).unwrap();
+    let backup = exports.join("backup.sqlite");
+    lib.backup(&backup).unwrap();
+
+    let db =
+        rusqlite::Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let journal: String = db
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(journal, "delete");
+    drop(db);
+    assert_eq!(fs::read_dir(&exports).unwrap().count(), 1);
+
+    let occupied = exports.join("occupied.sqlite");
+    fs::create_dir(&occupied).unwrap();
+    assert!(lib.backup(&occupied).is_err());
+    assert!(occupied.is_dir());
+    assert_eq!(fs::read_dir(&exports).unwrap().count(), 2);
+}
+
+#[test]
+fn restore_preparation_failure_keeps_the_active_catalog() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("photos");
+    fs::create_dir(&root).unwrap();
+    fs::copy(fixture(), root.join("first.jpg")).unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let source = lib.add_source(root).unwrap();
+    wait(&lib, &source);
+    let asset = lib.query(Query::default()).unwrap().assets.remove(0);
+    let backup = tmp.path().join("backup.sqlite");
+    lib.backup(&backup).unwrap();
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER invalid_reset BEFORE UPDATE OF thumbnail_state ON assets
+         BEGIN SELECT RAISE(ABORT, 'invalid thumbnail state'); END;",
+    )
+    .unwrap();
+    drop(db);
+
+    lib.annotate(
+        asset.id.clone(),
+        Annotation {
+            favorite: true,
+            caption: "Active annotation".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(lib.restore(&backup).is_err());
+    let retained = lib.asset(&asset.id).unwrap();
+    assert!(retained.favorite);
+    assert_eq!(retained.caption, "Active annotation");
+    assert_eq!(retained.availability, "present");
+    assert_eq!(retained.thumbnail_state, "ready");
+}
+
+#[test]
+fn unreadable_folders_report_paths_and_recover_on_rescan() {
+    use std::os::unix::fs::PermissionsExt;
+    struct RestorePermissions(std::path::PathBuf);
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("photos");
+    let folder = root.join("旅行/locked");
+    fs::create_dir_all(&folder).unwrap();
+    fs::copy(fixture(), folder.join("original.jpg")).unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let id = lib.add_source(root).unwrap();
+    wait(&lib, &id);
+    let asset = lib.query(Query::default()).unwrap().assets.remove(0);
+    lib.annotate(
+        asset.id.clone(),
+        Annotation {
+            favorite: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    fs::remove_file(folder.join("original.jpg")).unwrap();
+    let permissions = RestorePermissions(folder.clone());
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap();
+    lib.start_scan(&id).unwrap();
+    wait_for_state(&lib, &id, "partial");
+    let page = lib.source_issues(&id, None).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.issues[0].path.as_deref(), Some("旅行/locked"));
+    assert_eq!(page.issues[0].code, "folder_unreadable");
+    assert!(!page.issues[0].message.is_empty());
+    let source = lib.overview().unwrap().sources.remove(0);
+    assert_eq!(source.scan_errors, 1);
+    assert_eq!(source.media_errors, 0);
+    assert_eq!(lib.asset(&asset.id).unwrap().availability, "present");
+    assert!(lib.asset(&asset.id).unwrap().favorite);
+    drop(permissions);
+    lib.start_scan(&id).unwrap();
+    wait(&lib, &id);
+    assert_eq!(lib.source_issues(&id, None).unwrap().total, 0);
+    assert_eq!(lib.asset(&asset.id).unwrap().availability, "missing");
+    assert!(lib.asset(&asset.id).unwrap().favorite);
+}
+
+#[test]
+fn scan_issue_backups_restore_current_and_version_one_catalogs() {
+    use bimb_core::platform;
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let root = tmp.path().join("photos");
+    fs::create_dir(&root).unwrap();
+    lib.catalog().call(move |db| {
+        db.execute("INSERT INTO sources(id,name,path,display_path,volume,root_key) VALUES('source','Holiday',?,?,'volume','root')", rusqlite::params![platform::path_bytes(&root),root.to_string_lossy()])?;
+        db.execute("INSERT INTO issues(source_id,code,path,message) VALUES('source','folder_unreadable',?,'Permission denied')", [platform::path_bytes(std::path::Path::new("旅行/locked"))])?;
+        Ok(())
+    }).unwrap();
+    let backup = tmp.path().join("backup.sqlite");
+    lib.backup(&backup).unwrap();
+    lib.restore(&backup).unwrap();
+    let page = lib.source_issues("source", None).unwrap();
+    assert_eq!(page.issues[0].path.as_deref(), Some("旅行/locked"));
+    assert_eq!(page.issues[0].message, "Permission denied");
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    db.execute_batch("ALTER TABLE sources DROP COLUMN relative_root; ALTER TABLE sources DROP COLUMN filesystem; ALTER TABLE sources DROP COLUMN drive_kind; ALTER TABLE sources DROP COLUMN read_only; DELETE FROM meta WHERE key='path_encoding'; DROP TABLE collections; DROP TABLE issues; CREATE TABLE issues(id INTEGER PRIMARY KEY,source_id TEXT REFERENCES sources(id) ON DELETE CASCADE,code TEXT NOT NULL); INSERT INTO issues(source_id,code) VALUES('source','folder_unreadable'); PRAGMA user_version=1;").unwrap();
+    drop(db);
+    lib.restore(&backup).unwrap();
+    let page = lib.source_issues("source", None).unwrap();
+    assert_eq!(page.total, 1);
+    assert!(page.issues[0].path.is_none());
+    assert_eq!(lib.overview().unwrap().sources[0].name, "Holiday");
+    // Upgrading a backup must leave the selected backup file itself untouched.
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn collections_survive_backup_restore_and_export_and_restore_version_two() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Library::open(&tmp.path().join("catalog")).unwrap();
+    let id = lib
+        .save_collection(
+            String::new(),
+            "旅行".into(),
+            Query {
+                place: "Goa".into(),
+                date_from: "2024-01-01".into(),
+                sort: "name".into(),
+                ascending: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let backup = tmp.path().join("backup.sqlite");
+    lib.backup(&backup).unwrap();
+    lib.save_collection(id.clone(), "Changed".into(), Query::default())
+        .unwrap();
+    lib.restore(&backup).unwrap();
+    let saved = lib.overview().unwrap().collections.remove(0);
+    assert_eq!(saved.id, id);
+    assert_eq!(saved.name, "旅行");
+    assert_eq!(saved.query.place, "Goa");
+    assert_eq!(saved.query.date_from, "2024-01-01");
+    assert!(saved.query.ascending);
+    let export = tmp.path().join("annotations.json");
+    lib.export_annotations(&export).unwrap();
+    let data: serde_json::Value = serde_json::from_slice(&fs::read(export).unwrap()).unwrap();
+    assert_eq!(data["collections"][0]["name"], "旅行");
+    assert_eq!(data["collections"][0]["query"]["place"], "Goa");
+    assert!(data["collections"][0]["query"]["cursor"].is_null());
+    // A real schema-2 backup has no collection table. Upgrade only the staged copy.
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    db.execute_batch("ALTER TABLE sources DROP COLUMN relative_root; ALTER TABLE sources DROP COLUMN filesystem; ALTER TABLE sources DROP COLUMN drive_kind; ALTER TABLE sources DROP COLUMN read_only; DELETE FROM meta WHERE key='path_encoding'; DROP TABLE collections; PRAGMA user_version=2;")
+        .unwrap();
+    drop(db);
+    lib.restore(&backup).unwrap();
+    assert!(lib.overview().unwrap().collections.is_empty());
+    let db = rusqlite::Connection::open(&backup).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    lib.restore(&tmp.path().join("catalog/before-restore.sqlite"))
+        .unwrap();
+    assert_eq!(lib.overview().unwrap().collections[0].id, id);
 }
 fn fixture() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mountain.jpg")

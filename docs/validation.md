@@ -1,6 +1,22 @@
 # Apple Silicon preview validation
 
-10–11 October 2026. Local development preview; this is not a general availability or cross-platform certification.
+10–11 October 2026, with scan-report, saved-collection and drive-adapter validation on 28 October 2026. Local development preview; this is not a general availability or cross-platform certification.
+
+## Installer and drive images — 10 November
+
+- On the development Mac, the Apple Silicon DMG from `f67d43b` passed signature, image and SHA-256 verification. The installed copy started with an isolated catalog and generated JPEG thumbnails for the synthetic JPEG, PNG, HEIC, H.264 and HEVC fixtures.
+- Replacing a test install built from `c3159a0` with the DMG copy migrated its catalog from schema 3 to schema 4. The native UI showed the retained source, favorite and caption. The original file matched byte for byte and the pre-upgrade backup passed SQLite integrity checking.
+- The earlier exFAT image creation failure was reproduced with the 14-character `BimbTest-exfat` label. With labels within the 11-character limit, all four local FAT32 and exFAT checks passed in writable and read-only mode.
+- For each filesystem, forcing a disposable image to detach during a nested-directory rescan reproduced a macOS directory-close panic. Bimb now marks the scan interrupted and keeps the cached thumbnail available. Remounting the image read-only at a different path resumed indexing and preserved the original photo, favorite and caption. Physical drives, fresh-machine installer acceptance and the new installer CI workflow remain open.
+
+## Drive compatibility increment — 28 October
+
+- Schema 4 preserves schemas 1–3 and adds filesystem/drive/read-only details, volume-relative roots and native path provenance. Foreign-OS catalogs are rejected before their paths are interpreted; restore validates a staged copy before replacing the active catalog.
+- The macOS native suite passes 23 tests (plus one intentionally ignored mounted-image test). New checks cover source format/read-only observations, relative-root persistence, metadata and preview generation, rename identity/annotations, offline cached thumbnails, reconnect/rescan, lossless native path encodings, unique reconnect selection and ambiguous identities, schema-3 collections and foreign-path rejection. Existing native media/watcher tests also pass with OS-service access.
+- `npm run check`, `npm run build` and the 9.80 MiB macOS app bundle build pass. macOS and Windows-target core clippy passes with warnings denied. The Windows check includes all core test/example targets; it uses linked SQLite declarations to avoid requiring a Windows C compiler on the Mac. This is a Rust type/lint check, **not** a Windows executable build or runtime test.
+- The Windows host dispatches a bounded native media subprocess before creating the UI. WinRT/WIC provides image decoding, EXIF orientation, sRGB JPEG derivatives, image metadata/GPS, video metadata and OS video thumbnails. HEIC/HEVC require suitable installed codecs; in-webview playback remains a separate capability. Windows shell open/reveal and OS-specific development/build scripts are implemented.
+- A compatibility workflow builds and tests on macOS 26 and Windows, and runs synthetic FAT32/exFAT images on macOS. The earlier image run failed with `Operation not permitted`. The November checks above identify and address the exFAT creation failure.
+- Windows runtime/UI, physical NTFS/FAT/exFAT drives, changed Windows drive letters, physical hot unplug and full driver/codec combinations remain validation gates. A Windows USB SSD may report as a fixed device. FAT file IDs and coarse timestamps limit rename/replacement confidence; Bimb never guesses a rename when identity evidence changes.
 
 ## Environment and commands
 
@@ -9,21 +25,27 @@
 - SQLite 3.53.2, bundled through rusqlite 0.40.2.
 - `npm run check`: zero errors and zero warnings.
 - `cargo clippy --workspace --all-targets --offline -- -D warnings`: passed.
-- `cargo test --workspace --offline`: all 10 targeted tests passed with native codec access.
+- `cargo test --workspace --offline`: all 18 targeted tests passed with native codec and filesystem notification access on 28 October.
 
 ## Automated evidence
 
 | Test group | Verified behavior |
 |---|---|
-| Catalog, 3 tests | Literal full-text search, annotation search updates, pagination/ties, stale cursor rejection, valid date overrides, memory provenance and exclusions. |
-| Library, 6 tests | Scan/rescan, rename identity and annotations, source overlap rejection, originals unchanged, offline thumbnails, relink, backup/restore and safety-backup restore, source interruption, budget enforcement, exclusive catalog lock, Unicode filenames/lossless path serialization, symlink rejection, corrupt media handling, watcher attachment reconciliation, and subsequent file-add notifications. |
+| Catalog, 8 tests | Literal full-text search, annotation search updates, pagination/ties, stale cursor rejection, valid date overrides, memory provenance and exclusions; source-scoped 100-issue pages, cursor rejection after a new scan, separate media/scan counts, and schema-1/2 catalog migration. Saved collections preserve every query filter and sort, clear pagination, recompute matches after inserts/annotations, persist after reopening, validate names/filters, and stay empty when their source or album is removed. |
+| Library, 9 tests | Scan/rescan, rename identity and annotations, source overlap rejection, originals unchanged, offline thumbnails, relink, backup/restore and safety-backup restore, source interruption, budget enforcement, exclusive catalog lock, Unicode filenames/lossless path serialization, symlink rejection, corrupt media handling, watcher attachment reconciliation, and subsequent file-add notifications; unreadable-folder reporting and recovery, conservative missing-file handling during a partial scan, and schema-1/2/3 backup restoration. Collections survive backup/restore, safety-backup restore and JSON organization export; upgrading leaves selected older backups unchanged. |
 | Desktop protocol, 1 test | Bounded video byte ranges, suffix/open ranges, invalid and out-of-bounds requests. |
 
 Fixtures are synthetic JPEG, PNG, HEIC, H.264 MP4 and HEVC MOV, plus deliberately corrupt JPEG. Orientation, GPS and dimensions are checked. APFS rejects invalid UTF-8 filenames, so arbitrary-byte serialization is checked independently from actual Unicode filename I/O.
 
 The interrupted-source test renames the root during a rescan of 40 images and verifies that all prior entries remain offline rather than becoming missing. It does not emulate every physical USB/filesystem failure.
 
+On 28 October, a real source subfolder with a Unicode path was made unreadable using filesystem permissions. Its scan stayed partial, reported the relative path and underlying error, and preserved the previously indexed asset and favorite. Restoring access and rescanning cleared the report and correctly reconciled the now-missing file. Catalog tests cover 205 scan issues across three bounded pages and rejection of a cursor from an earlier scan. Backup tests restore schema-1 and schema-2 reports and verify that upgrading leaves the selected backup unchanged.
+
+A browser UI smoke test with synthetic desktop responses verified the expanded report, Unicode paths, separate scan/media controls, all 205 issues, refresh, and recovery from a stale scan cursor. This is UI evidence with a stub API, not a native-window acceptance test. The updated macOS app bundle built successfully (9.69 MiB).
+
 ## Native UI evidence
+
+A separate packaged instance on 28 October used a temporary catalog and three synthetic photos to verify saved collections through the native command bridge. Saving captured the latest search text and source, accepted a Unicode name, and reopened from the sidebar. Updating the name and favorites filter persisted across application restart. Favoriting a photo made it appear in the collection without editing membership; unsaved filter changes and **Reset to saved** behaved correctly. Duplicate names kept the dialog open with an error that survived background refresh. Deleting the test collection preserved all three photos and the favorite annotation. The updated bundle built successfully (9.79 MiB).
 
 A packaged native window was tested with an isolated catalog and synthetic fixtures. The native folder picker, indexing, thumbnails, HEIC preview, H.264/HEVC video playback, place/tag editing, and search were exercised. The corrupt fixture remains visible with an attention state. The optimized 9.63 MiB bundle reopened its persisted catalog with the development server stopped. No personal media was used.
 
@@ -39,14 +61,33 @@ On 11 October, the final native release displayed the HEIC cached thumbnail, cap
 
 `cargo run -p bimb-core --example catalog_benchmark --offline` inserted 3,000 synthetic catalog rows and ran 100 text search/sort queries. Observed debug-build latency: **p50 18.8 ms; p95 21.5 ms**. These results include the local catalog queries and exclude media I/O and UI rendering. They are not a 1 TB import benchmark or a guarantee for an arbitrary drive.
 
+## Local media benchmark — 10 November
+
+The packaged macOS app from `7829655` indexed 3,000 synthetic files from the internal drive in an isolated catalog. The source contained 600 copies each of the repository's JPEG, PNG, HEIC, H.264 and HEVC fixtures across 30 folders. The files totaled 26.3 MiB.
+
+| Check | Observed result |
+|---|---|
+| Initial scan | 230.8 seconds, 3,000 thumbnails, zero media errors |
+| Manual rescan of unchanged files | 1.13 seconds, all 3,000 thumbnails retained |
+| Native filename search | A single match appeared in 0.43 seconds during indexing and in 0.76 seconds after indexing for two different search terms. Times include the input debounce and accessibility polling. |
+| Sampled resident memory | 160.1 MiB for the app and its child processes during initial indexing, sampled about every 100 ms. WebKit processes outside the app's process tree were excluded. |
+
+A generated H.264 clip with AAC audio, a 90-degree rotation, and three distinct frame intervals produced a 240 × 320 thumbnail matching the rotation metadata. A generated HEVC clip with HLG transfer metadata produced a 320 × 240 thumbnail. Both videos played to the end in the native viewer. The check verified the AAC track and playback controls. The actual 1 TB library, real phone exports, audio output, and HDR display fidelity remain open.
+
+## Catalog fault recovery — 10 November
+
+- A native test harness filled a disposable 48 MiB HFS+ image that held the catalog and a backup. The harness reproduced both SQLite `SQLITE_FULL` and filesystem `ENOSPC`. Failed annotation, backup replacement and restore attempts preserved the existing favorite, caption and backup bytes. Bimb reported an active scan as interrupted after its worker exited. After space was freed, the same process retried the scan and restored the backup successfully.
+- A child process was force-stopped after it committed a new media discovery while a catalog update was still uncommitted. Reopening the catalog rolled back the uncommitted update, retained the favorite and caption, and resumed indexing. The catalog passed SQLite integrity checks and the original photo still matched byte for byte.
+- Regression tests verify that a failed queue write can be retried, a backup is readable as a single SQLite file, and failed backup staging leaves no extra files. A backup with a trigger that aborts thumbnail preparation is rejected before it can replace the active catalog. Existing tests cover older catalog schemas and foreign-OS rejection.
+
 ## Current implementation choices
 
 - One background decode worker at a time, plus a separate serialized preview worker. Both are subprocesses with output limits and a 25-second deadline; images are downsampled using native codecs. This bounds concurrency, not a hard OS-enforced RAM ceiling.
 - Source scan state and discovered assets persist. Resume rewalks the source and skips unchanged completed work. Interrupted scans are visible for explicit resumption. A per-file durable queue and viewport-priority scheduling remain future refinements.
 - Filesystem notifications debounce for two seconds. Source availability refreshes every 30 seconds; a 15-minute reconciliation repairs missed watcher events. Pause/cancel is respected. Scans retry incomplete operations on a later rescan.
-- Relinks require the same volume UUID and root identity; a copied/replacement drive is a new source. Automatic remount lookup only handles unique matches below `/Volumes`.
+- Relinks require the same OS volume identifier and root identity; a copied/replacement drive is a new source. Reconnect candidates come from macOS mount roots or the original Windows volume's current drive-letter/mounted-folder paths, using the stored volume-relative root. Multiple verified matches remain ambiguous.
 - One SQLite actor serializes reads and writes. This is adequate for the measured 3,000-row workload; a dedicated read pool is not implemented.
-- Date and named-place collections use filters and manual albums. Saved dynamic collections and a folder tree are not implemented. The error filter exposes media errors; folder traversal issues currently appear as source attention counts rather than a detailed per-folder report.
+- Saved dynamic collections retain search text, combinable filters and sorting, with up to 100 named collections. Matching results update as catalog data changes; on-this-day collections also honor memory preferences and exclusions. Source/album filters retain their original IDs after removal, yielding no matches rather than broadening the search. A folder tree is not implemented. The error filter exposes media errors. Expand **Show scan issues** in a source card for affected source-relative paths and error details, fetched in pages of 100. Refresh the report during a scan; a rescan replaces prior issues. Old pathless issues are preserved through migration and gain details on rescan.
 - Image GPS is normalized; video location metadata is retained as raw text and is not yet available to the GPS filter. EXIF offsets are retained; date grouping uses recorded wall time, and filesystem-date fallbacks are excluded from memories unless overridden.
 - Still previews are capped at 2,560 pixels. Thumbnails are capped at 512 pixels. Full-resolution originals can be opened explicitly in another application.
 - Catalog backups preserve organization and source references, not originals or thumbnails. Restoring marks thumbnails for regeneration; disconnected sources may need reconnecting to repopulate thumbnails.
@@ -56,6 +97,6 @@ On 11 October, the final native release displayed the HEIC cached thumbnail, cap
 
 - Validate a representative subset of the user's phone exports, including audio, HDR, rotation, variable frame rate, long videos, and any motion-photo variants.
 - Measure initial scan, warm rescan, UI latency and combined memory on the actual 3,000-file / 1 TB library.
-- Physical external-drive hot unplug/reconnect and filesystem-specific identity tests (including exFAT); source permission changes, app termination at commit boundaries, disk-full injection, and invalid/migration recovery scenarios.
-- Detailed folder error reporting, viewport-priority decoding, saved dynamic collections, and a full implementation review against the approved architecture before declaring the complete first release.
-- Public distribution requires signing/notarization and a license decision. Windows and Intel/macOS compatibility need their own native adapters and validation phase.
+- Physical external-drive hot unplug/reconnect and filesystem-specific identity tests, including exFAT. Repeat the disk-full and forced-termination checks on Windows.
+- Viewport-priority decoding and a full implementation review against the approved architecture before declaring the complete first release.
+- Public distribution requires signing/notarization and a license decision. The Windows adapter needs native runtime/packaging/UI validation; Intel/macOS needs its own native build and validation phase.

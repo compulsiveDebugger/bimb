@@ -1,0 +1,52 @@
+name: Desktop compatibility
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: npm ci
+      - run: npm run docs:check
+      - run: npm run check
+      - run: npm run build
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build native installers
+        run: npm run desktop:build -- --ci
+      - name: Verify macOS bundle signature and disk image
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --deep --strict target/release/bundle/macos/Bimb.app
+          hdiutil verify target/release/bundle/dmg/*.dmg
+      - name: Collect installer, checksums and offline guides
+        run: npm run installers:collect
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bimb-preview-${{ matrix.os }}-${{ github.sha }}
+          path: target/release/installers/
+          if-no-files-found: error
+          retention-days: 30
+  disk-images:
+    # Keep filesystem evidence separate from installer creation; failures remain visible.
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: FAT32 and exFAT disk images, including read-only sources
+        run: python3 scripts/test-drive-images.py

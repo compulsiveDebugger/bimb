@@ -6,12 +6,32 @@ pub struct Source {
     pub name: String,
     pub path: String,
     pub volume_id: String,
+    pub filesystem: String,
+    pub drive_kind: String,
+    pub read_only: Option<bool>,
     pub state: String,
     pub scan_state: String,
     pub total: i64,
     pub errors: i64,
+    pub media_errors: i64,
+    pub scan_errors: i64,
     pub last_scan: Option<String>,
     pub exclusions: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SourceIssue {
+    pub id: i64,
+    pub path: Option<String>,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SourceIssuePage {
+    pub issues: Vec<SourceIssue>,
+    pub total: i64,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -133,6 +153,12 @@ pub struct Album {
     pub count: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    pub query: Query,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub thumbnail_budget: u64,
     pub memories_enabled: bool,
@@ -151,6 +177,7 @@ impl Default for Settings {
 pub struct Overview {
     pub sources: Vec<Source>,
     pub albums: Vec<Album>,
+    pub collections: Vec<Collection>,
     pub settings: Settings,
     pub total: i64,
     pub photos: i64,

@@ -42,7 +42,6 @@ pub fn normalized_date(raw: Option<&str>) -> Option<String> {
 }
 
 pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
-    let _gate = lib.0.scan_gate.lock().unwrap();
     if !active(flag) {
         return Ok(());
     }
@@ -51,7 +50,7 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
     if volume != source.volume || key != source.root_key {
         bail!("source_changed");
     }
-    let device = platform::device(&std::fs::metadata(&source.root)?);
+    let device = platform::device(&source.root, &std::fs::metadata(&source.root)?);
     let source_id = id.to_owned();
     source.generation=lib.catalog().call(move|c|{
         let tx=c.transaction()?;
@@ -64,7 +63,10 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
     let root = source.root.clone();
     let walker = walkdir::WalkDir::new(&source.root)
         .follow_links(false)
-        .max_open(16)
+        .same_file_system(true)
+        // On macOS, dropping two disconnected directory streams can panic twice
+        // during unwinding and abort the process. Buffer parent entries instead.
+        .max_open(if cfg!(target_os = "macos") { 1 } else { 16 })
         .into_iter()
         .filter_entry(move |entry| {
             if entry.depth() == 0 {
@@ -74,26 +76,35 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
             let excluded = exclusions.iter().any(|p| relative.starts_with(p));
             let name = entry.file_name().to_string_lossy();
             !excluded
+                && !(entry.file_type().is_dir()
+                    && std::fs::symlink_metadata(entry.path())
+                        .is_ok_and(|m| platform::is_link(&m) || platform::is_placeholder(&m)))
                 && !name.starts_with('.')
                 && !name.ends_with(".photoslibrary")
                 && !name.ends_with(".app")
-                && entry
-                    .metadata()
-                    .is_ok_and(|m| platform::device(&m) == device)
         });
     for entry in walker {
         if !active(flag) {
             return Ok(());
         }
         let current = std::fs::metadata(&source.root)?;
-        if platform::file_key(&current) != source.root_key || platform::device(&current) != device {
+        if platform::file_key(&source.root, &current) != source.root_key
+            || platform::device(&source.root, &current) != device
+        {
             bail!("source_disconnected");
         }
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => {
+            Err(error) => {
                 complete = false;
-                issue(lib, id, "folder_unreadable")?;
+                issue(
+                    lib,
+                    id,
+                    error.path(),
+                    &source.root,
+                    "folder_unreadable",
+                    &error.to_string(),
+                )?;
                 continue;
             }
         };
@@ -105,14 +116,34 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
         };
         let info = match std::fs::symlink_metadata(entry.path()) {
             Ok(m) => m,
-            Err(_) => {
+            Err(error) => {
                 complete = false;
+                issue(
+                    lib,
+                    id,
+                    Some(entry.path()),
+                    &source.root,
+                    "file_unreadable",
+                    &error.to_string(),
+                )?;
                 continue;
             }
         };
         let relative = entry.path().strip_prefix(&source.root)?.to_owned();
-        let revision = platform::revision(&info);
-        let file_key = platform::file_key(&info);
+        let revision = platform::revision(entry.path(), &info);
+        let file_key = platform::file_key(entry.path(), &info);
+        if file_key.is_empty() {
+            complete = false;
+            issue(
+                lib,
+                id,
+                Some(entry.path()),
+                &source.root,
+                "file_identity_unavailable",
+                "Could not safely identify this file; its existing catalog entry was preserved",
+            )?;
+            continue;
+        }
         let modified: DateTime<Utc> = info.modified()?.into();
         let added = Utc::now().to_rfc3339();
         let source_id = id.to_owned();
@@ -136,7 +167,7 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
             let mut existing=existing;
             // A same-path replacement with a different file identity keeps the old record's annotations separate.
             if let Some((old,_,old_key,_,_,_))=&existing&& old_key!=&file_key {
-                let tombstone=format!(".bimb-replaced/{old}").into_bytes();
+                let tombstone=platform::path_bytes(Path::new(&format!(".bimb-replaced/{old}")));
                 tx.execute("UPDATE assets SET path=?,state='replaced' WHERE id=?",params![tombstone,old])?;existing=None;
             }
             // Preserve identity on a uniquely established rename, but never merge simultaneous hard links.
@@ -214,9 +245,10 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
             return Ok(());
         }
         let stable = std::fs::symlink_metadata(entry.path())
-            .is_ok_and(|m| platform::revision(&m) == revision)
+            .is_ok_and(|m| platform::revision(entry.path(), &m) == revision)
             && std::fs::metadata(&source.root).is_ok_and(|m| {
-                platform::file_key(&m) == source.root_key && platform::device(&m) == device
+                platform::file_key(&source.root, &m) == source.root_key
+                    && platform::device(&source.root, &m) == device
             });
         if !stable {
             let _ = std::fs::remove_file(&temporary);
@@ -281,7 +313,11 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
             }
             // A skipped nested mount is not authoritative scan coverage.
             if relative.ancestors().skip(1).any(|p| {
-                std::fs::metadata(source.root.join(p)).is_ok_and(|m| platform::device(&m) != device)
+                std::fs::symlink_metadata(source.root.join(p)).is_ok_and(|m| {
+                    platform::is_link(&m)
+                        || platform::is_placeholder(&m)
+                        || platform::device(&source.root.join(p), &m) != device
+                })
             }) {
                 continue;
             }
@@ -292,8 +328,8 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
         }
         // A disappearing root must not turn the candidate list into missing files.
         let current = std::fs::metadata(&source.root)?;
-        if platform::file_key(&current) != source.root_key
-            || platform::device(&current) != device
+        if platform::file_key(&source.root, &current) != source.root_key
+            || platform::device(&source.root, &current) != device
             || !active(flag)
         {
             bail!("source_changed");
@@ -322,13 +358,24 @@ pub fn run(lib: &Library, id: &str, flag: &AtomicU8) -> Result<()> {
         Ok(())
     })
 }
-fn issue(lib: &Library, id: &str, code: &str) -> Result<()> {
+fn issue(
+    lib: &Library,
+    id: &str,
+    path: Option<&Path>,
+    root: &Path,
+    code: &str,
+    message: &str,
+) -> Result<()> {
     let id = id.to_owned();
+    let path = path
+        .and_then(|p| p.strip_prefix(root).ok())
+        .map(platform::path_bytes);
     let code = code.to_owned();
+    let message = message.to_owned();
     lib.catalog().call(move |c| {
         c.execute(
-            "INSERT INTO issues(source_id,code) VALUES(?,?)",
-            params![id, code],
+            "INSERT INTO issues(source_id,path,code,message) VALUES(?,?,?,?)",
+            params![id, path, code, message],
         )?;
         Ok(())
     })
